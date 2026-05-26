@@ -1,0 +1,2924 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>The Gridiron Ledger — Sleeper Dashboard</title>
+  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='82' font-size='80'%3E%F0%9F%8F%88%3C/text%3E%3C/svg%3E" />
+  <style>
+    html, body { margin: 0; padding: 0; background: #f5efe2; }
+    body { font-family: 'Manrope', system-ui, -apple-system, sans-serif; }
+    #initial-loader { display: flex; align-items: center; justify-content: center; min-height: 100vh; flex-direction: column; gap: 20px; color: #5e6675; }
+    .spinner { width: 36px; height: 36px; border: 3px solid #d9cdb0; border-top-color: #b04a1c; border-radius: 50%; animation: spin 0.8s linear infinite; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    #initial-loader .title { font-size: 11px; letter-spacing: 0.2em; text-transform: uppercase; font-weight: 700; color: #8b8576; }
+    #initial-loader .sub { font-size: 13px; color: #5e6675; max-width: 320px; text-align: center; line-height: 1.5; }
+    #fatal-error { display: none; max-width: 500px; margin: 80px auto; padding: 24px; background: #fbecec; border: 1px solid #962323; border-radius: 4px; color: #962323; font-family: system-ui, sans-serif; }
+    #fatal-error.show { display: block; }
+    #fatal-error h2 { margin-top: 0; }
+    #fatal-error code { background: #fff; padding: 2px 6px; border-radius: 2px; font-size: 12px; }
+  </style>
+</head>
+<body>
+  <div id="root">
+    <div id="initial-loader">
+      <div class="spinner"></div>
+      <div class="title">Preparing Dashboard</div>
+      <div class="sub">First load takes a couple of seconds — compiling the app in your browser. After that, it's instant.</div>
+    </div>
+  </div>
+  <div id="fatal-error">
+    <h2>Something didn't load</h2>
+    <p>Check your internet connection. If you're behind a corporate firewall or VPN, try a different network.</p>
+    <p>Details: <code id="fatal-error-msg"></code></p>
+  </div>
+  <script>
+    window.addEventListener('error', function(e) {
+      var el = document.getElementById('fatal-error');
+      var msg = document.getElementById('fatal-error-msg');
+      if (el && msg && (e.message || (e.target && e.target.src))) {
+        msg.textContent = e.message || ('Failed to load: ' + e.target.src);
+        el.classList.add('show');
+      }
+    }, true);
+  </script>
+  <script crossorigin src="https://unpkg.com/react@18.3.1/umd/react.production.min.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.production.min.js"></script>
+  <script src="https://unpkg.com/@babel/standalone@7.25.6/babel.min.js"></script>
+  <script type="text/babel" data-presets="react">
+const { useState, useEffect, useMemo, useCallback } = React;
+
+/* ============================================================
+   Sleeper Fantasy Dashboard
+   Pulls live data from Sleeper's public API. No login needed.
+   Default username: Giddy90 (change in the header to look up others)
+   ============================================================ */
+
+const API = 'https://api.sleeper.app/v1';
+const PROJ_API = 'https://api.sleeper.com/projections/nfl';
+const AVATAR = 'https://sleepercdn.com/avatars/thumbs';
+const FANTASYCALC_API = 'https://api.fantasycalc.com/values/current';
+
+// Pinned leagues — always loaded directly by ID, so they appear regardless of
+// what season is selected. These persist across seasons as long as the league
+// IDs stay the same on Sleeper's side.
+const PINNED_LEAGUE_IDS = [
+  '1350964848560701440',
+  '1342107047746863104',
+];
+
+const C = {
+  bg: '#f5efe2',
+  bgAlt: '#ece4d1',
+  card: '#fbf7ed',
+  fg: '#10182a',
+  fgMuted: '#5e6675',
+  fgSubtle: '#8b8576',
+  accent: '#b04a1c',
+  accentSoft: '#d97a3a',
+  border: '#d9cdb0',
+  borderStrong: '#b8a878',
+  success: '#3d6b4a',
+  danger: '#962323',
+  ink: '#1c2333',
+};
+
+const POS_COLOR = {
+  QB: { bg: '#fae3dd', fg: '#7a2418' },
+  RB: { bg: '#dfead8', fg: '#2e5c3a' },
+  WR: { bg: '#dde7f1', fg: '#1f3f63' },
+  TE: { bg: '#fae5cf', fg: '#824a18' },
+  K:  { bg: '#e8defa', fg: '#4a2c7a' },
+  DEF:{ bg: '#e0dcd2', fg: '#3d3a32' },
+  FLEX:{ bg: '#f0e0d8', fg: '#5a3a2a' },
+  BN: { bg: '#ece4d1', fg: '#6b6555' },
+  IR: { bg: '#f0d8d8', fg: '#7a2424' },
+  TAXI:{ bg: '#e0e8df', fg: '#3a5a4a' },
+};
+
+const STYLE = `
+@import url('https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600;9..144,700;9..144,900&family=Manrope:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;700&display=swap');
+
+.sd-root {
+  font-family: 'Manrope', system-ui, sans-serif;
+  color: ${C.fg};
+  background: ${C.bg};
+  background-image:
+    radial-gradient(circle at 10% 0%, rgba(176,74,28,0.06), transparent 50%),
+    radial-gradient(circle at 95% 100%, rgba(28,35,51,0.05), transparent 50%);
+  min-height: 100vh;
+  font-feature-settings: 'ss01', 'cv11';
+  letter-spacing: -0.005em;
+}
+.sd-display {
+  font-family: 'Fraunces', Georgia, serif;
+  font-optical-sizing: auto;
+  font-variation-settings: 'opsz' 96;
+  letter-spacing: -0.02em;
+}
+.sd-mono { font-family: 'JetBrains Mono', ui-monospace, monospace; font-variant-numeric: tabular-nums; }
+.sd-num { font-variant-numeric: tabular-nums; }
+
+.sd-card {
+  background: ${C.card};
+  border: 1px solid ${C.border};
+  border-radius: 4px;
+  box-shadow: 0 1px 0 rgba(28,35,51,0.04), 0 8px 24px -16px rgba(28,35,51,0.12);
+}
+
+.sd-input {
+  background: ${C.card};
+  border: 1px solid ${C.border};
+  border-radius: 3px;
+  padding: 8px 12px;
+  font-family: inherit;
+  font-size: 14px;
+  color: ${C.fg};
+  outline: none;
+  transition: border-color 0.15s, box-shadow 0.15s;
+}
+.sd-input:focus { border-color: ${C.accent}; box-shadow: 0 0 0 3px rgba(176,74,28,0.12); }
+
+.sd-btn {
+  background: ${C.ink};
+  color: ${C.bg};
+  border: none;
+  border-radius: 3px;
+  padding: 9px 16px;
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  cursor: pointer;
+  transition: background 0.15s, transform 0.05s;
+}
+.sd-btn:hover { background: ${C.accent}; }
+.sd-btn:active { transform: translateY(1px); }
+.sd-btn:disabled { background: ${C.fgSubtle}; cursor: not-allowed; }
+
+.sd-btn-ghost {
+  background: transparent;
+  color: ${C.fg};
+  border: 1px solid ${C.border};
+}
+.sd-btn-ghost:hover { background: ${C.bgAlt}; }
+
+.sd-tab {
+  background: transparent;
+  color: ${C.fgMuted};
+  border: none;
+  border-bottom: 2px solid transparent;
+  padding: 10px 14px;
+  font-family: 'Manrope', sans-serif;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  cursor: pointer;
+  transition: color 0.15s, border-color 0.15s;
+}
+.sd-tab:hover { color: ${C.fg}; }
+.sd-tab.active { color: ${C.accent}; border-bottom-color: ${C.accent}; }
+
+.sd-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 7px;
+  border-radius: 3px;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  font-family: 'JetBrains Mono', monospace;
+}
+
+.sd-row-hover:hover { background: ${C.bgAlt}; }
+.sd-row-me { background: linear-gradient(90deg, rgba(176,74,28,0.10), rgba(176,74,28,0.02)); }
+.sd-row-me:hover { background: linear-gradient(90deg, rgba(176,74,28,0.15), rgba(176,74,28,0.05)); }
+
+.sd-divider {
+  height: 1px;
+  background: ${C.border};
+  border: none;
+  margin: 0;
+}
+
+.sd-rule {
+  height: 1px;
+  background: linear-gradient(90deg, ${C.borderStrong}, transparent);
+}
+
+.sd-shimmer {
+  background: linear-gradient(90deg, ${C.bgAlt} 0%, ${C.card} 50%, ${C.bgAlt} 100%);
+  background-size: 200% 100%;
+  animation: sd-shimmer 1.4s infinite;
+  border-radius: 3px;
+}
+@keyframes sd-shimmer {
+  0% { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
+}
+
+.sd-tag-pos { padding: 2px 5px; border-radius: 2px; font-size: 9px; font-weight: 700; letter-spacing: 0.05em; font-family: 'JetBrains Mono', monospace; }
+
+.sd-fade-in { animation: sd-fade 0.35s ease-out; }
+@keyframes sd-fade { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: translateY(0); } }
+
+select.sd-input { appearance: none; padding-right: 32px; background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'><path fill='%2310182a' d='M2 4l4 4 4-4'/></svg>"); background-repeat: no-repeat; background-position: right 10px center; }
+
+table.sd-table { width: 100%; border-collapse: collapse; }
+table.sd-table th { text-align: left; font-family: 'Manrope', sans-serif; font-size: 10px; font-weight: 700; letter-spacing: 0.1em; text-transform: uppercase; color: ${C.fgSubtle}; padding: 10px 12px; border-bottom: 1px solid ${C.border}; }
+table.sd-table td { padding: 12px; border-bottom: 1px solid ${C.border}; font-size: 14px; vertical-align: middle; }
+table.sd-table tr:last-child td { border-bottom: none; }
+
+.sd-scrollbar::-webkit-scrollbar { width: 8px; height: 8px; }
+.sd-scrollbar::-webkit-scrollbar-track { background: transparent; }
+.sd-scrollbar::-webkit-scrollbar-thumb { background: ${C.borderStrong}; border-radius: 4px; }
+`;
+
+/* ---------- API helpers ---------- */
+
+async function fetchJson(url) {
+  const r = await fetch(url);
+  if (r.status === 404) return null;
+  if (!r.ok) throw new Error(`HTTP ${r.status} on ${url}`);
+  const text = await r.text();
+  if (!text) return null;
+  return JSON.parse(text);
+}
+
+const avatarUrl = (id) => id ? `${AVATAR}/${id}` : null;
+
+const fmtPts = (n) => {
+  if (n === null || n === undefined) return '—';
+  return Number(n).toFixed(2);
+};
+
+const fmtDate = (ms) => {
+  if (!ms) return '';
+  const d = new Date(ms);
+  return d.toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' });
+};
+
+/* ---------- Small UI bits ---------- */
+
+const Skeleton = ({ h = 16, w = '100%' }) => (
+  <div className="sd-shimmer" style={{ height: h, width: w }} />
+);
+
+const Avatar = ({ url, name, size = 28 }) => {
+  const initials = (name || '?').split(' ').map(s => s[0]).slice(0, 2).join('').toUpperCase();
+  if (url) {
+    return <img src={url} alt={name} style={{ width: size, height: size, borderRadius: '50%', objectFit: 'cover', background: C.bgAlt, border: `1px solid ${C.border}` }} onError={(e) => { e.target.style.display='none'; }} />;
+  }
+  return (
+    <div style={{ width: size, height: size, borderRadius: '50%', background: C.bgAlt, border: `1px solid ${C.border}`, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: size * 0.4, fontWeight: 700, color: C.fgMuted, fontFamily: 'JetBrains Mono, monospace' }}>
+      {initials}
+    </div>
+  );
+};
+
+const PosTag = ({ pos }) => {
+  const color = POS_COLOR[pos] || POS_COLOR.BN;
+  return <span className="sd-tag-pos" style={{ background: color.bg, color: color.fg }}>{pos}</span>;
+};
+
+const Empty = ({ title, hint }) => (
+  <div style={{ padding: '48px 24px', textAlign: 'center', color: C.fgMuted }}>
+    <div className="sd-display" style={{ fontSize: 22, marginBottom: 8, color: C.fg }}>{title}</div>
+    {hint && <div style={{ fontSize: 14, maxWidth: 420, margin: '0 auto' }}>{hint}</div>}
+  </div>
+);
+
+const ErrorBox = ({ msg, onRetry }) => (
+  <div style={{ padding: 16, background: '#fbecec', border: `1px solid ${C.danger}`, borderRadius: 4, color: C.danger, fontSize: 13 }}>
+    <strong>Couldn't load that.</strong> {msg}
+    {onRetry && <button onClick={onRetry} className="sd-btn" style={{ marginLeft: 12, background: C.danger, fontSize: 11, padding: '4px 10px' }}>Retry</button>}
+  </div>
+);
+
+/* ============================================================
+   MAIN COMPONENT
+   ============================================================ */
+
+function SleeperDashboard() {
+  const [username, setUsername] = useState('Giddy90');
+  const [usernameInput, setUsernameInput] = useState('Giddy90');
+  const [season, setSeason] = useState('2025');
+
+  const [user, setUser] = useState(null);
+  const [userErr, setUserErr] = useState(null);
+  const [loadingUser, setLoadingUser] = useState(false);
+
+  const [leagues, setLeagues] = useState([]);
+  const [pinnedLeagues, setPinnedLeagues] = useState([]);
+  const [selectedLeagueId, setSelectedLeagueId] = useState(null);
+  const [loadingLeagues, setLoadingLeagues] = useState(false);
+  const [refreshKey, setRefreshKey] = useState(0);
+  const [lastLoaded, setLastLoaded] = useState(null);
+
+  const [league, setLeague] = useState(null);
+  const [leagueUsers, setLeagueUsers] = useState([]);
+  const [rosters, setRosters] = useState([]);
+  const [loadingLeague, setLoadingLeague] = useState(false);
+  const [leagueErr, setLeagueErr] = useState(null);
+
+  const [nflState, setNflState] = useState(null);
+  const [playersDb, setPlayersDb] = useState(null);
+  const [loadingPlayers, setLoadingPlayers] = useState(false);
+  const [playersErr, setPlayersErr] = useState(null);
+
+  const [activeTab, setActiveTab] = useState('standings');
+
+  /* ----- Load NFL state once ----- */
+  useEffect(() => {
+    fetchJson(`${API}/state/nfl`).then(setNflState).catch(() => {});
+  }, []);
+
+  /* ----- Load pinned leagues directly by ID (independent of season) ----- */
+  useEffect(() => {
+    let cancel = false;
+    Promise.all(
+      PINNED_LEAGUE_IDS.map(id =>
+        fetchJson(`${API}/league/${id}`).catch(() => null)
+      )
+    ).then(results => {
+      if (cancel) return;
+      const valid = results.filter(Boolean).map(l => ({ ...l, _pinned: true }));
+      setPinnedLeagues(valid);
+      // Auto-select first pinned league if nothing selected yet
+      setSelectedLeagueId(prev => prev || valid[0]?.league_id || null);
+    });
+    return () => { cancel = true; };
+  }, [refreshKey]);
+
+  /* ----- Lookup user when username submitted ----- */
+  const lookupUser = useCallback(async (uname) => {
+    setLoadingUser(true);
+    setUserErr(null);
+    setUser(null);
+    setLeagues([]);
+    setSelectedLeagueId(null);
+    try {
+      const u = await fetchJson(`${API}/user/${encodeURIComponent(uname)}`);
+      if (!u) throw new Error(`No Sleeper user "${uname}"`);
+      setUser(u);
+    } catch (e) {
+      setUserErr(e.message);
+    } finally {
+      setLoadingUser(false);
+    }
+  }, []);
+
+  useEffect(() => { if (username) lookupUser(username); }, [username, lookupUser, refreshKey]);
+
+  /* ----- Load leagues when user/season changes ----- */
+  useEffect(() => {
+    if (!user) return;
+    let cancel = false;
+    setLoadingLeagues(true);
+    fetchJson(`${API}/user/${user.user_id}/leagues/nfl/${season}`)
+      .then(data => {
+        if (cancel) return;
+        const arr = data || [];
+        setLeagues(arr);
+        // Only auto-select if nothing pinned has been chosen
+        setSelectedLeagueId(prev => prev || arr[0]?.league_id || null);
+      })
+      .catch(e => { if (!cancel) console.error(e); })
+      .finally(() => { if (!cancel) setLoadingLeagues(false); });
+    return () => { cancel = true; };
+  }, [user, season, refreshKey]);
+
+  /* ----- Load league detail when selection changes ----- */
+  useEffect(() => {
+    if (!selectedLeagueId) {
+      setLeague(null); setLeagueUsers([]); setRosters([]);
+      return;
+    }
+    let cancel = false;
+    setLoadingLeague(true);
+    setLeagueErr(null);
+    Promise.all([
+      fetchJson(`${API}/league/${selectedLeagueId}`),
+      fetchJson(`${API}/league/${selectedLeagueId}/users`),
+      fetchJson(`${API}/league/${selectedLeagueId}/rosters`),
+    ]).then(([lg, us, rs]) => {
+      if (cancel) return;
+      setLeague(lg);
+      setLeagueUsers(us || []);
+      setRosters(rs || []);
+      setLastLoaded(new Date());
+    }).catch(e => { if (!cancel) setLeagueErr(e.message); })
+      .finally(() => { if (!cancel) setLoadingLeague(false); });
+    return () => { cancel = true; };
+  }, [selectedLeagueId, refreshKey]);
+
+  /* ----- Lazy-load players DB on demand ----- */
+  const ensurePlayers = useCallback(async () => {
+    if (playersDb || loadingPlayers) return;
+    setLoadingPlayers(true);
+    setPlayersErr(null);
+    try {
+      const data = await fetchJson(`${API}/players/nfl`);
+      setPlayersDb(data || {});
+    } catch (e) {
+      setPlayersErr(e.message);
+    } finally {
+      setLoadingPlayers(false);
+    }
+  }, [playersDb, loadingPlayers]);
+
+  // Trigger load when on a tab that needs player data
+  useEffect(() => {
+    if (['rosters', 'matchups', 'transactions', 'draft', 'values'].includes(activeTab)) {
+      ensurePlayers();
+    }
+  }, [activeTab, ensurePlayers]);
+
+  /* ----- Derived helpers ----- */
+  const userByRosterId = useMemo(() => {
+    const map = {};
+    const userMap = {};
+    leagueUsers.forEach(u => { userMap[u.user_id] = u; });
+    rosters.forEach(r => { map[r.roster_id] = userMap[r.owner_id]; });
+    return map;
+  }, [leagueUsers, rosters]);
+
+  const teamNameOf = useCallback((rosterId) => {
+    const u = userByRosterId[rosterId];
+    if (!u) return `Roster ${rosterId}`;
+    return u.metadata?.team_name || u.display_name || u.username || `Roster ${rosterId}`;
+  }, [userByRosterId]);
+
+  const ownerNameOf = useCallback((rosterId) => {
+    const u = userByRosterId[rosterId];
+    return u?.display_name || u?.username || '';
+  }, [userByRosterId]);
+
+  const myRosterId = useMemo(() => {
+    if (!user) return null;
+    return rosters.find(r => r.owner_id === user.user_id)?.roster_id || null;
+  }, [user, rosters]);
+
+  /* ----- Render ----- */
+  return (
+    <div className="sd-root">
+      <style>{STYLE}</style>
+
+      <Header
+        usernameInput={usernameInput}
+        setUsernameInput={setUsernameInput}
+        onSubmitUsername={() => setUsername(usernameInput.trim())}
+        season={season}
+        setSeason={setSeason}
+        user={user}
+        loadingUser={loadingUser}
+        nflState={nflState}
+        onRefresh={() => setRefreshKey(k => k + 1)}
+        lastLoaded={lastLoaded}
+        refreshing={loadingLeague || loadingLeagues || loadingUser}
+      />
+
+      <div style={{ maxWidth: 1200, margin: '0 auto', padding: '20px 24px 48px' }}>
+
+        {userErr && <div style={{ marginBottom: 16 }}><ErrorBox msg={userErr} onRetry={() => lookupUser(username)} /></div>}
+
+        {/* League picker */}
+        {(user || pinnedLeagues.length > 0) && (
+          <div style={{ marginBottom: 24 }}>
+            {(() => {
+              // Merge pinned + season-fetched leagues, dedupe by league_id
+              const merged = [];
+              const seen = new Set();
+              pinnedLeagues.forEach(l => { merged.push(l); seen.add(l.league_id); });
+              leagues.forEach(l => { if (!seen.has(l.league_id)) { merged.push(l); seen.add(l.league_id); } });
+
+              if (loadingLeagues && merged.length === 0) {
+                return <div className="sd-card" style={{ padding: 16 }}><Skeleton h={20} w="40%" /></div>;
+              }
+              if (merged.length === 0) {
+                return (
+                  <div className="sd-card" style={{ padding: 24 }}>
+                    <Empty
+                      title={`No leagues found for ${user?.display_name || user?.username || 'this user'} in ${season}`}
+                      hint={`If you've been invited but haven't joined yet, accept the invite in the Sleeper app first. Or try a different season above.`}
+                    />
+                  </div>
+                );
+              }
+              return (
+                <LeagueStrip
+                  leagues={merged}
+                  selectedId={selectedLeagueId}
+                  onSelect={setSelectedLeagueId}
+                />
+              );
+            })()}
+          </div>
+        )}
+
+        {/* League content */}
+        {selectedLeagueId && (
+          <>
+            {leagueErr && <ErrorBox msg={leagueErr} />}
+
+            {loadingLeague ? (
+              <div className="sd-card" style={{ padding: 24 }}>
+                <Skeleton h={28} w="50%" />
+                <div style={{ marginTop: 12 }}><Skeleton h={14} w="80%" /></div>
+                <div style={{ marginTop: 8 }}><Skeleton h={14} w="60%" /></div>
+              </div>
+            ) : league && (
+              <div className="sd-fade-in">
+                <LeagueHero league={league} myRosterId={myRosterId} teamNameOf={teamNameOf} />
+
+                <CopyForClaudeBar
+                  league={league}
+                  rosters={rosters}
+                  leagueUsers={leagueUsers}
+                  teamNameOf={teamNameOf}
+                  ownerNameOf={ownerNameOf}
+                  userByRosterId={userByRosterId}
+                  myRosterId={myRosterId}
+                  user={user}
+                  nflState={nflState}
+                  playersDb={playersDb}
+                  ensurePlayers={ensurePlayers}
+                />
+
+                <TabBar active={activeTab} onChange={setActiveTab} />
+
+                <div style={{ marginTop: 20 }}>
+                  {activeTab === 'standings' && (
+                    <StandingsView
+                      rosters={rosters}
+                      teamNameOf={teamNameOf}
+                      ownerNameOf={ownerNameOf}
+                      userByRosterId={userByRosterId}
+                      myRosterId={myRosterId}
+                      league={league}
+                    />
+                  )}
+                  {activeTab === 'rosters' && (
+                    <RostersView
+                      rosters={rosters}
+                      teamNameOf={teamNameOf}
+                      userByRosterId={userByRosterId}
+                      myRosterId={myRosterId}
+                      playersDb={playersDb}
+                      loadingPlayers={loadingPlayers}
+                      playersErr={playersErr}
+                      league={league}
+                    />
+                  )}
+                  {activeTab === 'matchups' && (
+                    <MatchupsView
+                      league={league}
+                      rosters={rosters}
+                      teamNameOf={teamNameOf}
+                      userByRosterId={userByRosterId}
+                      myRosterId={myRosterId}
+                      playersDb={playersDb}
+                      loadingPlayers={loadingPlayers}
+                      nflState={nflState}
+                    />
+                  )}
+                  {activeTab === 'values' && (
+                    <ValuesTrendsView
+                      league={league}
+                      rosters={rosters}
+                      teamNameOf={teamNameOf}
+                      userByRosterId={userByRosterId}
+                      myRosterId={myRosterId}
+                      playersDb={playersDb}
+                      loadingPlayers={loadingPlayers}
+                      ensurePlayers={ensurePlayers}
+                    />
+                  )}
+                  {activeTab === 'transactions' && (
+                    <TransactionsView
+                      league={league}
+                      teamNameOf={teamNameOf}
+                      playersDb={playersDb}
+                      loadingPlayers={loadingPlayers}
+                      nflState={nflState}
+                    />
+                  )}
+                  {activeTab === 'draft' && (
+                    <DraftView
+                      league={league}
+                      teamNameOf={teamNameOf}
+                      userByRosterId={userByRosterId}
+                      myRosterId={myRosterId}
+                      playersDb={playersDb}
+                      loadingPlayers={loadingPlayers}
+                    />
+                  )}
+                  {activeTab === 'schedule' && (
+                    <ScheduleView
+                      league={league}
+                      teamNameOf={teamNameOf}
+                      myRosterId={myRosterId}
+                      nflState={nflState}
+                    />
+                  )}
+                </div>
+              </div>
+            )}
+          </>
+        )}
+
+        <Footer />
+      </div>
+    </div>
+  );
+}
+
+/* ============================================================
+   HEADER
+   ============================================================ */
+const Header = ({ usernameInput, setUsernameInput, onSubmitUsername, season, setSeason, user, loadingUser, nflState, onRefresh, lastLoaded, refreshing }) => {
+  const onKey = (e) => { if (e.key === 'Enter') onSubmitUsername(); };
+
+  // build season options: recent 6 + current
+  const seasons = useMemo(() => {
+    const current = parseInt(nflState?.season || '2025', 10);
+    return Array.from({ length: 8 }, (_, i) => String(current - i + 1)).filter(y => parseInt(y) >= current - 6);
+  }, [nflState]);
+
+  const [tickRefresh, setTickRefresh] = useState(0);
+  useEffect(() => {
+    const id = setInterval(() => setTickRefresh(t => t + 1), 30000);
+    return () => clearInterval(id);
+  }, []);
+
+  const freshness = useMemo(() => {
+    if (!lastLoaded) return null;
+    const secs = Math.floor((Date.now() - lastLoaded.getTime()) / 1000);
+    if (secs < 60) return `${secs}s ago`;
+    if (secs < 3600) return `${Math.floor(secs / 60)}m ago`;
+    return `${Math.floor(secs / 3600)}h ago`;
+    // eslint-disable-next-line
+  }, [lastLoaded, tickRefresh]);
+
+  return (
+    <header style={{ borderBottom: `1px solid ${C.border}`, background: C.card }}>
+      <div style={{ maxWidth: 1200, margin: '0 auto', padding: '20px 24px', display: 'flex', alignItems: 'flex-end', justifyContent: 'space-between', flexWrap: 'wrap', gap: 16 }}>
+        <div>
+          <div style={{ fontSize: 10, letterSpacing: '0.2em', textTransform: 'uppercase', color: C.fgSubtle, fontWeight: 700, marginBottom: 4 }}>
+            Sleeper · Fantasy Almanac
+          </div>
+          <h1 className="sd-display" style={{ fontSize: 36, margin: 0, fontWeight: 700, lineHeight: 1, color: C.ink }}>
+            The Gridiron Ledger
+          </h1>
+          {user && (
+            <div style={{ marginTop: 10, display: 'flex', alignItems: 'center', gap: 8, fontSize: 13, color: C.fgMuted, flexWrap: 'wrap' }}>
+              <Avatar url={avatarUrl(user.avatar)} name={user.display_name} size={22} />
+              <span style={{ fontWeight: 600, color: C.fg }}>{user.display_name || user.username}</span>
+              <span style={{ color: C.fgSubtle }}>·</span>
+              <span className="sd-mono" style={{ fontSize: 11 }}>{user.user_id}</span>
+              {freshness && (
+                <>
+                  <span style={{ color: C.fgSubtle }}>·</span>
+                  <span style={{ display: 'inline-flex', alignItems: 'center', gap: 5, fontSize: 11 }}>
+                    <span style={{ width: 6, height: 6, borderRadius: '50%', background: C.success, display: 'inline-block' }} />
+                    Live · loaded {freshness}
+                  </span>
+                </>
+              )}
+            </div>
+          )}
+        </div>
+
+        <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+          <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+            <label style={{ fontSize: 10, letterSpacing: '0.15em', textTransform: 'uppercase', color: C.fgSubtle, fontWeight: 700 }}>User</label>
+            <input
+              className="sd-input"
+              value={usernameInput}
+              onChange={e => setUsernameInput(e.target.value)}
+              onKeyDown={onKey}
+              placeholder="Sleeper username"
+              style={{ width: 160 }}
+            />
+          </div>
+          <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+            <label style={{ fontSize: 10, letterSpacing: '0.15em', textTransform: 'uppercase', color: C.fgSubtle, fontWeight: 700 }}>Season</label>
+            <select className="sd-input" value={season} onChange={e => setSeason(e.target.value)} style={{ width: 95 }}>
+              {seasons.map(s => <option key={s} value={s}>{s}</option>)}
+            </select>
+          </div>
+          <button className="sd-btn" onClick={onSubmitUsername} disabled={loadingUser}>
+            {loadingUser ? 'Loading…' : 'Look up'}
+          </button>
+          <button className="sd-btn sd-btn-ghost" onClick={onRefresh} disabled={refreshing} title="Re-fetch all data from Sleeper">
+            {refreshing ? '↻ …' : '↻ Refresh'}
+          </button>
+        </div>
+      </div>
+    </header>
+  );
+};
+
+/* ============================================================
+   LEAGUE STRIP
+   ============================================================ */
+const LeagueStrip = ({ leagues, selectedId, onSelect }) => (
+  <div className="sd-card sd-scrollbar" style={{ padding: 4, display: 'flex', gap: 4, overflowX: 'auto' }}>
+    {leagues.map(lg => {
+      const active = lg.league_id === selectedId;
+      return (
+        <button
+          key={lg.league_id}
+          onClick={() => onSelect(lg.league_id)}
+          style={{
+            padding: '10px 14px',
+            background: active ? C.ink : 'transparent',
+            color: active ? C.bg : C.fg,
+            border: 'none',
+            borderRadius: 3,
+            cursor: 'pointer',
+            textAlign: 'left',
+            flex: '0 0 auto',
+            minWidth: 220,
+            transition: 'background 0.15s',
+          }}
+        >
+          <div style={{ fontSize: 13, fontWeight: 700, marginBottom: 2, display: 'flex', alignItems: 'center', gap: 6 }}>
+            {lg._pinned && <span title="Pinned league" style={{ color: active ? C.accentSoft : C.accent, fontSize: 10 }}>★</span>}
+            {lg.name}
+          </div>
+          <div style={{ fontSize: 10, opacity: 0.7, letterSpacing: '0.05em' }} className="sd-mono">
+            {lg.total_rosters} teams · {lg.season} · {lg.status}
+          </div>
+        </button>
+      );
+    })}
+  </div>
+);
+
+/* ============================================================
+   LEAGUE HERO
+   ============================================================ */
+const LeagueHero = ({ league, myRosterId, teamNameOf }) => {
+  const settings = league.settings || {};
+  const scoring = league.scoring_settings || {};
+  const isPpr = (scoring.rec || 0) >= 0.5;
+  const isHalfPpr = (scoring.rec || 0) > 0 && (scoring.rec || 0) < 1;
+
+  const stats = [
+    { label: 'Format', value: scoring.rec >= 1 ? 'PPR' : isHalfPpr ? 'Half-PPR' : scoring.rec > 0 ? 'Modified' : 'Standard' },
+    { label: 'Teams', value: league.total_rosters },
+    { label: 'Playoffs', value: `Wk ${settings.playoff_week_start || '?'}` },
+    { label: 'Playoff Teams', value: settings.playoff_teams || '—' },
+    { label: 'Status', value: (league.status || '').replace(/_/g, ' ') },
+  ];
+
+  return (
+    <div className="sd-card" style={{ padding: 28, marginBottom: 20 }}>
+      <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', flexWrap: 'wrap', gap: 16 }}>
+        <div>
+          <div style={{ fontSize: 10, letterSpacing: '0.2em', textTransform: 'uppercase', color: C.fgSubtle, fontWeight: 700, marginBottom: 6 }}>
+            League · {league.season} · {league.season_type}
+          </div>
+          <h2 className="sd-display" style={{ fontSize: 32, margin: 0, fontWeight: 600, color: C.ink, lineHeight: 1.1 }}>
+            {league.name}
+          </h2>
+          {myRosterId && (
+            <div style={{ marginTop: 10, fontSize: 13, color: C.fgMuted }}>
+              You as <span style={{ color: C.accent, fontWeight: 700 }}>{teamNameOf(myRosterId)}</span>
+            </div>
+          )}
+        </div>
+      </div>
+
+      <div className="sd-rule" style={{ margin: '20px 0' }} />
+
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(120px, 1fr))', gap: 16 }}>
+        {stats.map(s => (
+          <div key={s.label}>
+            <div style={{ fontSize: 10, letterSpacing: '0.12em', textTransform: 'uppercase', color: C.fgSubtle, fontWeight: 700, marginBottom: 4 }}>{s.label}</div>
+            <div className="sd-display" style={{ fontSize: 22, fontWeight: 600, color: C.fg, textTransform: 'capitalize' }}>{s.value}</div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+};
+
+/* ============================================================
+   COPY FOR CLAUDE — builds a structured snapshot the user can
+   paste into a Claude chat to ask for help/analysis
+   ============================================================ */
+async function buildSnapshot({ league, rosters, leagueUsers, teamNameOf, ownerNameOf, userByRosterId, myRosterId, user, nflState, playersDb }) {
+  const lines = [];
+  const push = (s = '') => lines.push(s);
+  const rule = () => push('─'.repeat(60));
+
+  push(`SLEEPER LEAGUE SNAPSHOT`);
+  push(`Generated: ${new Date().toISOString()}`);
+  rule();
+  push(`League:   ${league.name}`);
+  push(`Season:   ${league.season} (${league.season_type})`);
+  push(`Status:   ${league.status}`);
+  push(`Format:   ${(league.scoring_settings?.rec || 0) >= 1 ? 'PPR' : (league.scoring_settings?.rec || 0) > 0 ? 'Half-PPR' : 'Standard'}`);
+  push(`Teams:    ${league.total_rosters}`);
+  push(`Playoffs: Wk ${league.settings?.playoff_week_start || '?'} (${league.settings?.playoff_teams || '?'} teams)`);
+  if (nflState) push(`NFL state: ${nflState.season} ${nflState.season_type}, week ${nflState.week}`);
+  push();
+
+  // STANDINGS
+  push(`STANDINGS`);
+  rule();
+  const sorted = [...rosters].sort((a, b) => {
+    const aw = a.settings?.wins || 0; const bw = b.settings?.wins || 0;
+    if (bw !== aw) return bw - aw;
+    const al = a.settings?.losses || 0; const bl = b.settings?.losses || 0;
+    if (al !== bl) return al - bl;
+    const af = (a.settings?.fpts || 0) + (a.settings?.fpts_decimal || 0) / 100;
+    const bf = (b.settings?.fpts || 0) + (b.settings?.fpts_decimal || 0) / 100;
+    return bf - af;
+  });
+  push(`Rk  Team                                       W-L-T    PF       PA       Diff`);
+  sorted.forEach((r, i) => {
+    const s = r.settings || {};
+    const fpts = (s.fpts || 0) + (s.fpts_decimal || 0) / 100;
+    const fpa = (s.fpts_against || 0) + (s.fpts_against_decimal || 0) / 100;
+    const team = teamNameOf(r.roster_id).slice(0, 40).padEnd(40);
+    const rec = `${s.wins || 0}-${s.losses || 0}${s.ties ? `-${s.ties}` : ''}`.padEnd(8);
+    const me = r.roster_id === myRosterId ? ' ←YOU' : '';
+    push(`${String(i + 1).padStart(2)}. ${team}  ${rec} ${fpts.toFixed(2).padStart(7)}  ${fpa.toFixed(2).padStart(7)}  ${(fpts - fpa >= 0 ? '+' : '') + (fpts - fpa).toFixed(2).padStart(7)}${me}`);
+  });
+  push();
+
+  // YOUR ROSTER
+  const myRoster = rosters.find(r => r.roster_id === myRosterId);
+  if (myRoster && playersDb) {
+    push(`YOUR ROSTER — ${teamNameOf(myRosterId)}`);
+    rule();
+    const positions = league.roster_positions || [];
+    const starters = myRoster.starters || [];
+    const allPlayers = myRoster.players || [];
+    const bench = allPlayers.filter(p => !starters.includes(p) && !(myRoster.reserve || []).includes(p) && !(myRoster.taxi || []).includes(p));
+
+    push(`Starters:`);
+    starters.forEach((pid, i) => {
+      const slot = (positions[i] || 'FLEX').padEnd(5);
+      const p = playersDb[pid];
+      if (!p) { push(`  ${slot} —`); return; }
+      const name = p.full_name || `${p.first_name || ''} ${p.last_name || ''}`.trim();
+      const tag = `${p.position || '?'} · ${p.team || 'FA'}`;
+      const inj = p.injury_status ? ` [${p.injury_status}]` : '';
+      push(`  ${slot} ${name.padEnd(28)} ${tag}${inj}`);
+    });
+    if (bench.length > 0) {
+      push(`Bench:`);
+      bench.forEach(pid => {
+        const p = playersDb[pid];
+        if (!p) return;
+        const name = p.full_name || `${p.first_name || ''} ${p.last_name || ''}`.trim();
+        const tag = `${p.position || '?'} · ${p.team || 'FA'}`;
+        const inj = p.injury_status ? ` [${p.injury_status}]` : '';
+        push(`  BN    ${name.padEnd(28)} ${tag}${inj}`);
+      });
+    }
+    if ((myRoster.reserve || []).length > 0) {
+      push(`IR:`);
+      myRoster.reserve.forEach(pid => {
+        const p = playersDb[pid];
+        if (!p) return;
+        push(`  IR    ${(p.full_name || p.last_name || '').padEnd(28)} ${p.position} · ${p.team || 'FA'}`);
+      });
+    }
+    push();
+  }
+
+  // RECENT MATCHUPS — fetch current week if active season
+  const isLive = league.season === String(nflState?.season || '');
+  const currentWeek = isLive && nflState?.week ? nflState.week : null;
+
+  // PLAYER VALUES & TRENDING — fetch from FantasyCalc (DYNASTY) + Sleeper trending + traded picks + prior season
+  try {
+    const scoring = league.scoring_settings || {};
+    const rec = scoring.rec || 0;
+    const ppr = rec >= 1 ? 1 : rec >= 0.5 ? 0.5 : 0;
+    const isSuperflex = (league.roster_positions || []).includes('SUPER_FLEX');
+    const teams = league.total_rosters || 12;
+    const validTeamCounts = [8, 10, 12, 14, 16];
+    const numTeams = validTeamCounts.reduce((c, t) => Math.abs(t - teams) < Math.abs(c - teams) ? t : c, 12);
+    const fcUrl = `${FANTASYCALC_API}?isDynasty=true&numQbs=${isSuperflex ? 2 : 1}&numTeams=${numTeams}&ppr=${ppr}`;
+
+    const [vals, tAdd, tDrop, tradedPicks, prevRosters, draftInfo] = await Promise.all([
+      fetchJson(fcUrl).catch(() => []),
+      fetchJson(`${API}/players/nfl/trending/add?lookback_hours=24&limit=15`).catch(() => []),
+      fetchJson(`${API}/players/nfl/trending/drop?lookback_hours=24&limit=8`).catch(() => []),
+      fetchJson(`${API}/league/${league.league_id}/traded_picks`).catch(() => []),
+      league.previous_league_id ? fetchJson(`${API}/league/${league.previous_league_id}/rosters`).catch(() => []) : Promise.resolve([]),
+      league.draft_id ? fetchJson(`${API}/draft/${league.draft_id}`).catch(() => null) : Promise.resolve(null),
+    ]);
+
+    const draftType = draftInfo?.type || 'snake';
+    const isSnake = draftType === 'snake';
+    const totalTeams = rosters.length || 12;
+
+    if (Array.isArray(vals) && vals.length > 0) {
+      // Build tier-aware pick value lookup + average fallback
+      const playerValueOf = {};
+      const pickValueByYRT = {};
+      const pickGroups = {};
+      vals.forEach(v => {
+        if (v.player?.sleeperId) {
+          playerValueOf[v.player.sleeperId] = v;
+        } else {
+          // Inline pick name parser
+          const name = v.player?.name || '';
+          let parsed = null;
+          // Robust pick name parser (same logic as parsePickName)
+          const yearMatch = name.match(/(20[2-4]\d)/);
+          if (yearMatch) {
+            const tierMatch = name.match(/\b(early|mid|late)\b/i);
+            let round = null, slot = null;
+            let m = name.match(/\b(\d{1,2})(?:st|nd|rd|th)\b/i);
+            if (m) { const r = parseInt(m[1], 10); if (r >= 1 && r <= 7) round = r; }
+            if (!round) {
+              m = name.match(/(\d{1,2})\.(\d{1,2})/);
+              if (m) {
+                const r = parseInt(m[1], 10), s = parseInt(m[2], 10);
+                if (r >= 1 && r <= 7) { round = r; slot = s; }
+              }
+            }
+            if (!round) {
+              m = name.match(/\br(?:ound|d)?\.?\s*(\d{1,2})\b/i);
+              if (m) { const r = parseInt(m[1], 10); if (r >= 1 && r <= 7) round = r; }
+            }
+            if (round) parsed = { season: yearMatch[1], tier: tierMatch ? tierMatch[1].toLowerCase() : null, round, slot };
+          }
+          if (parsed) {
+            const { season, round, tier, slot } = parsed;
+            if (!pickValueByYRT[season]) pickValueByYRT[season] = {};
+            if (!pickValueByYRT[season][round]) pickValueByYRT[season][round] = {};
+            let tierKey = tier;
+            if (!tierKey && slot) {
+              const earlyMax = Math.ceil(totalTeams / 3);
+              const midMax = Math.ceil((totalTeams * 2) / 3);
+              tierKey = slot <= earlyMax ? 'early' : slot <= midMax ? 'mid' : 'late';
+            }
+            pickValueByYRT[season][round][tierKey || 'mid'] = v.value;
+            (pickGroups[`${season}-${round}`] ||= []).push(v.value);
+          }
+        }
+      });
+      const pickAvg = {};
+      Object.entries(pickGroups).forEach(([k, arr]) => { pickAvg[k] = arr.reduce((s, n) => s + n, 0) / arr.length; });
+
+      // Compute draft orders per year (N+1 uses current standings; N+2 uses prior year)
+      const orderFromRosters = (rs) => {
+        const sorted = [...rs].sort((a, b) => {
+          const aw = a.settings?.wins || 0; const bw = b.settings?.wins || 0;
+          if (aw !== bw) return aw - bw;
+          const af = (a.settings?.fpts || 0) + (a.settings?.fpts_decimal || 0) / 100;
+          const bf = (b.settings?.fpts || 0) + (b.settings?.fpts_decimal || 0) / 100;
+          return af - bf;
+        });
+        const order = {};
+        sorted.forEach((r, i) => { order[r.roster_id] = i + 1; });
+        return order;
+      };
+      const prevByOwner = {};
+      (prevRosters || []).forEach(r => { if (r.owner_id) prevByOwner[r.owner_id] = r; });
+      const priorProjection = rosters.map(r => {
+        const prev = prevByOwner[r.owner_id];
+        return { roster_id: r.roster_id, settings: prev?.settings || r.settings || {}, _hasPrev: !!prev };
+      });
+      const hasGames = rosters.some(r => (r.settings?.wins || 0) + (r.settings?.losses || 0) > 0);
+
+      const currentYear = parseInt(league.season || '2025', 10);
+      const draftOrders = {};
+      const orderSources = {};
+      const yearN1 = currentYear + 1;
+      const yearN2 = currentYear + 2;
+      if (hasGames) {
+        draftOrders[yearN1] = orderFromRosters(rosters);
+        orderSources[yearN1] = 'current in-progress standings';
+      } else if ((prevRosters || []).length > 0) {
+        draftOrders[yearN1] = orderFromRosters(priorProjection);
+        orderSources[yearN1] = 'prior season standings (projection)';
+      } else {
+        draftOrders[yearN1] = orderFromRosters(rosters);
+        orderSources[yearN1] = 'current rosters (no prior data)';
+      }
+      if ((prevRosters || []).length > 0) {
+        draftOrders[yearN2] = orderFromRosters(priorProjection);
+        orderSources[yearN2] = 'prior season standings (long-range projection)';
+      } else {
+        draftOrders[yearN2] = orderFromRosters(rosters);
+        orderSources[yearN2] = 'current rosters (no prior data)';
+      }
+
+      // Slot-aware value lookup
+      const valueForPick = (season, round, originalRoster) => {
+        const order = draftOrders[parseInt(season, 10)];
+        const slot = order?.[originalRoster];
+        let effSlot = slot;
+        if (isSnake && slot && round % 2 === 0) effSlot = totalTeams - slot + 1;
+        let tier = 'mid';
+        if (effSlot) {
+          const earlyMax = Math.ceil(totalTeams / 3);
+          const midMax = Math.ceil((totalTeams * 2) / 3);
+          tier = effSlot <= earlyMax ? 'early' : effSlot <= midMax ? 'mid' : 'late';
+        }
+        const yrRound = pickValueByYRT[season]?.[round];
+        const value = yrRound ? (yrRound[tier] ?? yrRound.mid ?? yrRound.early ?? yrRound.late ?? pickAvg[`${season}-${round}`] ?? 0) : (pickAvg[`${season}-${round}`] || 0);
+        return { value, slot, effSlot, tier };
+      };
+
+      // Pick ownership with slot-specific values
+      // Use years FantasyCalc actually returned; fall back to N+1, N+2
+      const fcYears = Object.keys(pickValueByYRT)
+        .map(s => parseInt(s, 10))
+        .filter(y => !isNaN(y) && y >= currentYear && y <= currentYear + 5)
+        .sort((a, b) => a - b);
+      const yearsToShow = fcYears.length > 0 ? fcYears.slice(0, 3) : [yearN1, yearN2];
+
+      // Ensure each used year has a draftOrder (compute for any not yet covered)
+      yearsToShow.forEach(yr => {
+        if (!draftOrders[yr]) {
+          if ((prevRosters || []).length > 0) {
+            draftOrders[yr] = orderFromRosters(priorProjection);
+            orderSources[yr] = 'prior season standings (projection)';
+          } else {
+            draftOrders[yr] = orderFromRosters(rosters);
+            orderSources[yr] = 'current rosters';
+          }
+        }
+      });
+
+      const ROOKIE_ROUNDS = 4;
+      const tradeMap = {};
+      (tradedPicks || []).forEach(t => { tradeMap[`${t.season}-${t.round}-${t.roster_id}`] = t.owner_id; });
+      const pickOwnership = {};
+      rosters.forEach(r => { pickOwnership[r.roster_id] = []; });
+      yearsToShow.forEach(yr => {
+        for (let rd = 1; rd <= ROOKIE_ROUNDS; rd++) {
+          rosters.forEach(r => {
+            const k = `${yr}-${rd}-${r.roster_id}`;
+            const owner = tradeMap[k] !== undefined ? tradeMap[k] : r.roster_id;
+            const info = valueForPick(String(yr), rd, r.roster_id);
+            pickOwnership[owner].push({
+              season: String(yr), round: rd, originalRoster: r.roster_id,
+              value: info.value, slot: info.slot, effSlot: info.effSlot, tier: info.tier,
+              traded: tradeMap[k] !== undefined,
+            });
+          });
+        }
+      });
+
+      // ROSTER VALUE RANKINGS (slot-aware picks)
+      push(`ROSTER VALUE RANKINGS — DYNASTY (FantasyCalc · ${ppr >= 1 ? 'PPR' : ppr >= 0.5 ? 'Half-PPR' : 'Std'} · ${numTeams}-team${isSuperflex ? ' SF' : ''}) · ${draftType} draft`);
+      push(`Pick years included: ${yearsToShow.join(', ')}`);
+      yearsToShow.forEach(yr => push(`  ${yr} draft order: ${orderSources[yr] || 'n/a'}`));
+      rule();
+      const rankings = rosters.map(r => {
+        const players = r.players || [];
+        const playerTotal = players.reduce((s, pid) => s + (playerValueOf[pid]?.value || 0), 0);
+        const startersTotal = (r.starters || []).reduce((s, pid) => s + (playerValueOf[pid]?.value || 0), 0);
+        const picks = pickOwnership[r.roster_id] || [];
+        const pickTotal = picks.reduce((s, p) => s + (p.value || 0), 0);
+        return { roster: r, playerTotal, pickTotal, startersTotal, total: playerTotal + pickTotal };
+      }).sort((a, b) => b.total - a.total);
+      rankings.forEach((row, i) => {
+        const me = row.roster.roster_id === myRosterId ? ' ←YOU' : '';
+        const team = teamNameOf(row.roster.roster_id).slice(0, 28).padEnd(28);
+        push(`${String(i + 1).padStart(2)}. ${team}  Players ${Math.round(row.playerTotal).toLocaleString().padStart(7)}  Picks ${Math.round(row.pickTotal).toLocaleString().padStart(5)}  Total ${Math.round(row.total).toLocaleString().padStart(7)}${me}`);
+      });
+      push();
+
+      // YOUR ROSTER (players)
+      if (myRosterId && playersDb) {
+        const my = rosters.find(r => r.roster_id === myRosterId);
+        if (my) {
+          push(`YOUR ROSTER — DYNASTY VALUES`);
+          rule();
+          (my.players || []).forEach(pid => {
+            const p = playersDb[pid];
+            const v = playerValueOf[pid];
+            if (!p) return;
+            const name = (p.full_name || `${p.first_name || ''} ${p.last_name || ''}`.trim()).padEnd(26);
+            const tag = `${(p.position || '?').padEnd(3)} ${(p.team || 'FA').padEnd(4)}`;
+            const val = v ? Math.round(v.value).toLocaleString().padStart(6) : '   —  ';
+            const trend = v?.trend30Day ? ` (${v.trend30Day > 0 ? '+' : ''}${Math.round(v.trend30Day)} 30d)` : '';
+            const age = p.age ? ` age ${p.age}` : '';
+            push(`  ${name} ${tag}${age.padEnd(8)}  ${val}${trend}`);
+          });
+          push();
+
+          // YOUR PICKS — with slot, tier, value
+          const myPicks = pickOwnership[myRosterId] || [];
+          if (myPicks.length > 0) {
+            push(`YOUR ROOKIE PICKS — projected slot & value`);
+            rule();
+            const byYear = {};
+            myPicks.forEach(p => { (byYear[p.season] ||= []).push(p); });
+            Object.entries(byYear).sort().forEach(([yr, picks]) => {
+              picks.sort((a, b) => a.round - b.round || (a.effSlot || 99) - (b.effSlot || 99)).forEach(p => {
+                const slotLabel = p.effSlot ? `${p.round}.${String(p.effSlot).padStart(2, '0')}` : `R${p.round}`;
+                const fromOther = p.originalRoster !== myRosterId ? ` (via ${teamNameOf(p.originalRoster)})` : '';
+                push(`  ${yr} ${ordinal(p.round)}  proj ${slotLabel} ${(p.tier || '').padEnd(5)}  ${Math.round(p.value).toLocaleString().padStart(6)}${fromOther}`);
+              });
+            });
+            push();
+          }
+        }
+      }
+
+      // TOP 30 OVERALL
+      push(`TOP 30 DYNASTY ASSETS`);
+      rule();
+      vals.slice(0, 30).forEach((v, i) => {
+        const p = v.player || {};
+        const isPick = !p.sleeperId;
+        const name = (p.name || '').slice(0, 24).padEnd(24);
+        const type = isPick ? 'PICK' : (p.position || '?').padEnd(4);
+        const value = Math.round(v.value || 0).toLocaleString().padStart(6);
+        const trend = v.trend30Day ? `${v.trend30Day > 0 ? '+' : ''}${Math.round(v.trend30Day)}` : '0';
+        push(`${String(i + 1).padStart(2)}. ${name} ${type}  ${value}  30d:${trend.padStart(5)}`);
+      });
+      push();
+    }
+
+    if (Array.isArray(tAdd) && tAdd.length > 0 && playersDb) {
+      push(`TRENDING ADDS (24h)`);
+      rule();
+      tAdd.slice(0, 12).forEach(t => {
+        const p = playersDb[t.player_id];
+        if (!p) return;
+        const name = (p.full_name || `${p.first_name || ''} ${p.last_name || ''}`.trim()).slice(0, 26).padEnd(26);
+        push(`  ${name} ${(p.position || '?').padEnd(3)} ${(p.team || 'FA').padEnd(4)}  ${t.count.toLocaleString()} moves`);
+      });
+      push();
+    }
+
+    if (Array.isArray(tDrop) && tDrop.length > 0 && playersDb) {
+      push(`TRENDING DROPS (24h)`);
+      rule();
+      tDrop.slice(0, 8).forEach(t => {
+        const p = playersDb[t.player_id];
+        if (!p) return;
+        const name = (p.full_name || `${p.first_name || ''} ${p.last_name || ''}`.trim()).slice(0, 26).padEnd(26);
+        push(`  ${name} ${(p.position || '?').padEnd(3)} ${(p.team || 'FA').padEnd(4)}  ${t.count.toLocaleString()} moves`);
+      });
+      push();
+    }
+  } catch (e) { /* swallow */ }
+
+  if (currentWeek) {
+    try {
+      const weeksToFetch = [Math.max(1, currentWeek - 1), currentWeek];
+      const matchupsPerWeek = await Promise.all(
+        weeksToFetch.map(w => fetchJson(`${API}/league/${league.league_id}/matchups/${w}`).then(d => ({ week: w, data: d || [] })).catch(() => null))
+      );
+
+      for (const wk of matchupsPerWeek) {
+        if (!wk || wk.data.length === 0) continue;
+        push(`MATCHUPS — Week ${wk.week}`);
+        rule();
+        const grouped = {};
+        wk.data.forEach(m => { (grouped[m.matchup_id ?? `s-${m.roster_id}`] ||= []).push(m); });
+        Object.values(grouped).forEach(pair => {
+          const [a, b] = pair;
+          if (!b) { push(`  ${teamNameOf(a.roster_id)}: ${fmtPts(a.points)}`); return; }
+          const aIsMe = a.roster_id === myRosterId;
+          const bIsMe = b.roster_id === myRosterId;
+          const marker = (aIsMe || bIsMe) ? ' ←YOU' : '';
+          push(`  ${teamNameOf(a.roster_id).slice(0, 28).padEnd(28)} ${fmtPts(a.points).padStart(7)}  vs  ${fmtPts(b.points).padEnd(7)} ${teamNameOf(b.roster_id).slice(0, 28)}${marker}`);
+        });
+        push();
+      }
+    } catch (e) { /* swallow */ }
+  }
+
+  // RECENT TRANSACTIONS — fetch last few weeks
+  try {
+    const maxWeek = currentWeek || 18;
+    const weeksToFetch = Array.from({ length: Math.min(3, maxWeek) }, (_, i) => maxWeek - i).filter(w => w >= 1);
+    const txByWeek = await Promise.all(
+      weeksToFetch.map(w => fetchJson(`${API}/league/${league.league_id}/transactions/${w}`).then(d => (d || []).map(t => ({ ...t, _week: w }))).catch(() => []))
+    );
+    const allTx = txByWeek.flat().filter(t => t.status === 'complete').sort((a, b) => (b.created || 0) - (a.created || 0)).slice(0, 8);
+    if (allTx.length > 0) {
+      push(`RECENT TRANSACTIONS`);
+      rule();
+      allTx.forEach(tx => {
+        const date = tx.created ? new Date(tx.created).toLocaleDateString('en-GB') : '';
+        push(`  [Wk ${tx._week}] ${tx.type.toUpperCase()} · ${date}`);
+        const adds = tx.adds || {}; const drops = tx.drops || {};
+        (tx.roster_ids || []).forEach(rid => {
+          const teamAdds = Object.entries(adds).filter(([_, r]) => r === rid).map(([pid]) => playersDb?.[pid]);
+          const teamDrops = Object.entries(drops).filter(([_, r]) => r === rid).map(([pid]) => playersDb?.[pid]);
+          teamAdds.forEach(p => p && push(`    ${teamNameOf(rid)}  +  ${p.full_name || p.last_name} (${p.position} · ${p.team || 'FA'})`));
+          teamDrops.forEach(p => p && push(`    ${teamNameOf(rid)}  −  ${p.full_name || p.last_name} (${p.position} · ${p.team || 'FA'})`));
+        });
+      });
+      push();
+    }
+  } catch (e) { /* swallow */ }
+
+  push(`(End of snapshot — paste this whole block into Claude with your question.)`);
+
+  return lines.join('\n');
+}
+
+const CopyForClaudeBar = ({ league, rosters, leagueUsers, teamNameOf, ownerNameOf, userByRosterId, myRosterId, user, nflState, playersDb, ensurePlayers }) => {
+  const [status, setStatus] = useState('idle'); // idle | building | copied | error
+  const [errMsg, setErrMsg] = useState(null);
+
+  const onClick = async () => {
+    setStatus('building'); setErrMsg(null);
+    try {
+      await ensurePlayers();
+      // Wait a tick for playersDb to settle if it just loaded
+      let db = playersDb;
+      if (!db) {
+        db = await fetchJson(`${API}/players/nfl`).catch(() => null);
+      }
+      const text = await buildSnapshot({
+        league, rosters, leagueUsers, teamNameOf, ownerNameOf, userByRosterId, myRosterId, user, nflState, playersDb: db,
+      });
+      await navigator.clipboard.writeText(text);
+      setStatus('copied');
+      setTimeout(() => setStatus('idle'), 2400);
+    } catch (e) {
+      setStatus('error');
+      setErrMsg(e.message);
+      setTimeout(() => setStatus('idle'), 4000);
+    }
+  };
+
+  return (
+    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, marginBottom: 14, padding: '10px 14px', background: C.bgAlt, border: `1px solid ${C.border}`, borderRadius: 3 }}>
+      <div style={{ fontSize: 12, color: C.fgMuted, lineHeight: 1.5 }}>
+        Want my input on a decision? Click <strong style={{ color: C.fg }}>Copy view for Claude</strong>, paste the snapshot into a new message, and ask anything — start/sit, trades, waivers, etc.
+      </div>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+        {status === 'copied' && <span style={{ fontSize: 12, color: C.success, fontWeight: 600 }}>✓ Copied — now paste into chat</span>}
+        {status === 'error' && <span style={{ fontSize: 12, color: C.danger }}>Couldn't copy: {errMsg}</span>}
+        <button
+          className="sd-btn"
+          onClick={onClick}
+          disabled={status === 'building'}
+          style={{ background: status === 'copied' ? C.success : undefined, whiteSpace: 'nowrap' }}
+        >
+          {status === 'building' ? 'Building…' : status === 'copied' ? '✓ Copied' : '📋 Copy view for Claude'}
+        </button>
+      </div>
+    </div>
+  );
+};
+
+/* ============================================================
+   TAB BAR
+   ============================================================ */
+const TabBar = ({ active, onChange }) => {
+  const tabs = [
+    { id: 'standings', label: 'Standings' },
+    { id: 'rosters', label: 'Rosters' },
+    { id: 'matchups', label: 'Matchups' },
+    { id: 'values', label: 'Values & Trends' },
+    { id: 'transactions', label: 'Transactions' },
+    { id: 'draft', label: 'Draft' },
+    { id: 'schedule', label: 'Schedule' },
+  ];
+  return (
+    <div style={{ borderBottom: `1px solid ${C.border}`, display: 'flex', gap: 4, overflowX: 'auto' }} className="sd-scrollbar">
+      {tabs.map(t => (
+        <button key={t.id} className={`sd-tab ${active === t.id ? 'active' : ''}`} onClick={() => onChange(t.id)}>
+          {t.label}
+        </button>
+      ))}
+    </div>
+  );
+};
+
+/* ============================================================
+   STANDINGS
+   ============================================================ */
+const StandingsView = ({ rosters, teamNameOf, ownerNameOf, userByRosterId, myRosterId, league }) => {
+  const sorted = useMemo(() => {
+    return [...rosters].sort((a, b) => {
+      const aw = a.settings?.wins || 0; const bw = b.settings?.wins || 0;
+      if (bw !== aw) return bw - aw;
+      const al = a.settings?.losses || 0; const bl = b.settings?.losses || 0;
+      if (al !== bl) return al - bl;
+      const af = (a.settings?.fpts || 0) + (a.settings?.fpts_decimal || 0) / 100;
+      const bf = (b.settings?.fpts || 0) + (b.settings?.fpts_decimal || 0) / 100;
+      return bf - af;
+    });
+  }, [rosters]);
+
+  const totalGames = useMemo(() => {
+    return Math.max(...sorted.map(r => (r.settings?.wins || 0) + (r.settings?.losses || 0) + (r.settings?.ties || 0)), 0);
+  }, [sorted]);
+
+  if (rosters.length === 0) return <Empty title="No rosters yet" hint="The league has been created but rosters haven't been set up." />;
+  if (totalGames === 0) return <Empty title="Season hasn't started" hint="No games played yet, so there's nothing to rank. Check back once Week 1 kicks off." />;
+
+  return (
+    <div className="sd-card" style={{ overflow: 'hidden' }}>
+      <table className="sd-table">
+        <thead>
+          <tr>
+            <th style={{ width: 40 }}>#</th>
+            <th>Team</th>
+            <th style={{ textAlign: 'center', width: 100 }}>W–L–T</th>
+            <th style={{ textAlign: 'right', width: 100 }}>PF</th>
+            <th style={{ textAlign: 'right', width: 100 }}>PA</th>
+            <th style={{ textAlign: 'right', width: 90 }}>Diff</th>
+            <th style={{ textAlign: 'right', width: 80 }}>Streak</th>
+          </tr>
+        </thead>
+        <tbody>
+          {sorted.map((r, i) => {
+            const s = r.settings || {};
+            const fpts = (s.fpts || 0) + (s.fpts_decimal || 0) / 100;
+            const fpa = (s.fpts_against || 0) + (s.fpts_against_decimal || 0) / 100;
+            const diff = fpts - fpa;
+            const u = userByRosterId[r.roster_id];
+            const isMe = r.roster_id === myRosterId;
+            const isPlayoff = league.settings?.playoff_teams && (i + 1) <= league.settings.playoff_teams;
+            return (
+              <tr key={r.roster_id} className={`sd-row-hover ${isMe ? 'sd-row-me' : ''}`}>
+                <td>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+                    <span className="sd-mono" style={{ fontSize: 13, fontWeight: 700, color: isPlayoff ? C.accent : C.fgMuted, width: 22 }}>{i + 1}</span>
+                    {isPlayoff && <span style={{ width: 4, height: 4, borderRadius: '50%', background: C.accent }} />}
+                  </div>
+                </td>
+                <td>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                    <Avatar url={avatarUrl(u?.avatar)} name={u?.display_name} />
+                    <div>
+                      <div style={{ fontWeight: 700, fontSize: 14 }}>{teamNameOf(r.roster_id)}</div>
+                      <div style={{ fontSize: 11, color: C.fgSubtle }}>{ownerNameOf(r.roster_id)}</div>
+                    </div>
+                  </div>
+                </td>
+                <td style={{ textAlign: 'center' }}>
+                  <span className="sd-mono" style={{ fontWeight: 600 }}>
+                    {s.wins || 0}–{s.losses || 0}{s.ties ? `–${s.ties}` : ''}
+                  </span>
+                </td>
+                <td style={{ textAlign: 'right' }} className="sd-mono">{fpts.toFixed(2)}</td>
+                <td style={{ textAlign: 'right' }} className="sd-mono" >{fpa.toFixed(2)}</td>
+                <td style={{ textAlign: 'right' }} className="sd-mono" >
+                  <span style={{ color: diff > 0 ? C.success : diff < 0 ? C.danger : C.fgMuted, fontWeight: 600 }}>
+                    {diff > 0 ? '+' : ''}{diff.toFixed(2)}
+                  </span>
+                </td>
+                <td style={{ textAlign: 'right' }} className="sd-mono" >
+                  {s.streak ? (
+                    <span style={{ color: s.streak.startsWith('W') ? C.success : C.danger, fontWeight: 600 }}>{s.streak}</span>
+                  ) : '—'}
+                </td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+      {league.settings?.playoff_teams && (
+        <div style={{ padding: '10px 14px', fontSize: 11, color: C.fgSubtle, borderTop: `1px solid ${C.border}`, background: C.bgAlt }}>
+          <span style={{ display: 'inline-block', width: 4, height: 4, borderRadius: '50%', background: C.accent, marginRight: 6, verticalAlign: 'middle' }} />
+          Top {league.settings.playoff_teams} make the playoffs.
+        </div>
+      )}
+    </div>
+  );
+};
+
+/* ============================================================
+   ROSTERS
+   ============================================================ */
+const RostersView = ({ rosters, teamNameOf, userByRosterId, myRosterId, playersDb, loadingPlayers, playersErr, league }) => {
+  const [expanded, setExpanded] = useState(null);
+
+  useEffect(() => { if (myRosterId) setExpanded(myRosterId); }, [myRosterId]);
+
+  if (loadingPlayers && !playersDb) {
+    return (
+      <div className="sd-card" style={{ padding: 24 }}>
+        <div style={{ marginBottom: 8 }}><Skeleton h={20} w="30%" /></div>
+        <div style={{ marginBottom: 8 }}><Skeleton h={14} w="60%" /></div>
+        <div style={{ fontSize: 12, color: C.fgMuted, marginTop: 12 }}>Loading NFL player database (~5MB, one-time)…</div>
+      </div>
+    );
+  }
+  if (playersErr) return <ErrorBox msg={playersErr} />;
+  if (!playersDb) return null;
+  if (rosters.length === 0) return <Empty title="No rosters yet" />;
+
+  const lookupPlayer = (id) => playersDb[id];
+
+  return (
+    <div style={{ display: 'grid', gap: 16 }}>
+      {rosters.map(r => {
+        const isMe = r.roster_id === myRosterId;
+        const isOpen = expanded === r.roster_id;
+        const u = userByRosterId[r.roster_id];
+        const positions = league.roster_positions || [];
+        const starters = r.starters || [];
+        const allPlayers = r.players || [];
+        const bench = allPlayers.filter(p => !starters.includes(p) && !(r.reserve || []).includes(p) && !(r.taxi || []).includes(p));
+        const ir = r.reserve || [];
+        const taxi = r.taxi || [];
+
+        return (
+          <div key={r.roster_id} className={`sd-card ${isMe ? '' : ''}`} style={{ overflow: 'hidden', borderColor: isMe ? C.accent : C.border }}>
+            <button
+              onClick={() => setExpanded(isOpen ? null : r.roster_id)}
+              style={{
+                width: '100%', padding: '14px 18px', display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+                background: 'transparent', border: 'none', cursor: 'pointer', textAlign: 'left',
+                borderBottom: isOpen ? `1px solid ${C.border}` : 'none',
+              }}
+            >
+              <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+                <Avatar url={avatarUrl(u?.avatar)} name={u?.display_name} size={36} />
+                <div>
+                  <div style={{ fontWeight: 700, fontSize: 15, color: isMe ? C.accent : C.fg }}>
+                    {teamNameOf(r.roster_id)}{isMe && <span style={{ marginLeft: 8, fontSize: 10, letterSpacing: '0.15em', textTransform: 'uppercase', background: C.accent, color: C.bg, padding: '2px 6px', borderRadius: 2 }}>You</span>}
+                  </div>
+                  <div style={{ fontSize: 12, color: C.fgSubtle }}>
+                    {u?.display_name || u?.username} · {(r.settings?.wins || 0)}–{(r.settings?.losses || 0)}{r.settings?.ties ? `–${r.settings.ties}` : ''}
+                  </div>
+                </div>
+              </div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 14 }}>
+                <div style={{ textAlign: 'right' }}>
+                  <div style={{ fontSize: 10, letterSpacing: '0.12em', textTransform: 'uppercase', color: C.fgSubtle, fontWeight: 700 }}>Points For</div>
+                  <div className="sd-mono" style={{ fontSize: 16, fontWeight: 700 }}>
+                    {((r.settings?.fpts || 0) + (r.settings?.fpts_decimal || 0) / 100).toFixed(2)}
+                  </div>
+                </div>
+                <span style={{ fontSize: 12, color: C.fgMuted, fontFamily: 'JetBrains Mono, monospace' }}>{isOpen ? '▼' : '▶'}</span>
+              </div>
+            </button>
+
+            {isOpen && (
+              <div className="sd-fade-in" style={{ padding: '16px 18px 20px' }}>
+                {/* Starters */}
+                <div style={{ fontSize: 10, letterSpacing: '0.15em', textTransform: 'uppercase', color: C.fgSubtle, fontWeight: 700, marginBottom: 10 }}>
+                  Starting Lineup
+                </div>
+                <div style={{ display: 'grid', gap: 4, marginBottom: 18 }}>
+                  {starters.map((pid, idx) => (
+                    <PlayerRow key={`s-${idx}-${pid}`} player={lookupPlayer(pid)} slot={positions[idx]} pid={pid} />
+                  ))}
+                </div>
+
+                {bench.length > 0 && (
+                  <>
+                    <div style={{ fontSize: 10, letterSpacing: '0.15em', textTransform: 'uppercase', color: C.fgSubtle, fontWeight: 700, marginBottom: 10 }}>Bench</div>
+                    <div style={{ display: 'grid', gap: 4, marginBottom: 14 }}>
+                      {bench.map(pid => <PlayerRow key={`b-${pid}`} player={lookupPlayer(pid)} slot="BN" pid={pid} />)}
+                    </div>
+                  </>
+                )}
+
+                {ir.length > 0 && (
+                  <>
+                    <div style={{ fontSize: 10, letterSpacing: '0.15em', textTransform: 'uppercase', color: C.fgSubtle, fontWeight: 700, marginBottom: 10 }}>Injured Reserve</div>
+                    <div style={{ display: 'grid', gap: 4, marginBottom: 14 }}>
+                      {ir.map(pid => <PlayerRow key={`i-${pid}`} player={lookupPlayer(pid)} slot="IR" pid={pid} />)}
+                    </div>
+                  </>
+                )}
+
+                {taxi.length > 0 && (
+                  <>
+                    <div style={{ fontSize: 10, letterSpacing: '0.15em', textTransform: 'uppercase', color: C.fgSubtle, fontWeight: 700, marginBottom: 10 }}>Taxi Squad</div>
+                    <div style={{ display: 'grid', gap: 4 }}>
+                      {taxi.map(pid => <PlayerRow key={`t-${pid}`} player={lookupPlayer(pid)} slot="TAXI" pid={pid} />)}
+                    </div>
+                  </>
+                )}
+
+                {allPlayers.length === 0 && <Empty title="Empty roster" hint="No players drafted yet." />}
+              </div>
+            )}
+          </div>
+        );
+      })}
+    </div>
+  );
+};
+
+const PlayerRow = ({ player, slot, pid, points }) => {
+  if (!player) {
+    return (
+      <div style={{ display: 'flex', alignItems: 'center', padding: '6px 8px', borderRadius: 3, background: C.bgAlt }}>
+        <div style={{ width: 44 }}><PosTag pos={slot || 'BN'} /></div>
+        <div style={{ flex: 1, fontSize: 13, color: C.fgMuted }}>
+          {pid === '0' || !pid ? '— empty slot —' : <span className="sd-mono" style={{ fontSize: 11 }}>Player {pid}</span>}
+        </div>
+      </div>
+    );
+  }
+  const name = player.full_name || `${player.first_name || ''} ${player.last_name || ''}`.trim() || player.last_name || `#${pid}`;
+  const inj = player.injury_status;
+  return (
+    <div className="sd-row-hover" style={{ display: 'flex', alignItems: 'center', padding: '6px 8px', borderRadius: 3, gap: 8 }}>
+      <div style={{ width: 44 }}><PosTag pos={slot || 'BN'} /></div>
+      <div style={{ flex: 1, display: 'flex', alignItems: 'center', gap: 8, minWidth: 0 }}>
+        <span style={{ fontSize: 13, fontWeight: 600, color: C.fg, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{name}</span>
+        {inj && <span className="sd-pill" style={{ background: '#fbe9e9', color: C.danger }}>{inj}</span>}
+      </div>
+      <div style={{ fontSize: 11, color: C.fgSubtle, fontFamily: 'JetBrains Mono, monospace', minWidth: 60, textAlign: 'right' }}>
+        {player.position} · {player.team || 'FA'}
+      </div>
+      {points !== undefined && (
+        <div className="sd-mono" style={{ minWidth: 56, textAlign: 'right', fontWeight: 700, fontSize: 13 }}>{fmtPts(points)}</div>
+      )}
+    </div>
+  );
+};
+
+/* ============================================================
+   MATCHUPS
+   ============================================================ */
+const MatchupsView = ({ league, rosters, teamNameOf, userByRosterId, myRosterId, playersDb, loadingPlayers, nflState }) => {
+  const defaultWeek = useMemo(() => {
+    if (league.season === String(nflState?.season || '') && nflState?.week) return nflState.week;
+    return 1;
+  }, [league, nflState]);
+
+  const [week, setWeek] = useState(defaultWeek);
+  const [matchups, setMatchups] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [err, setErr] = useState(null);
+
+  useEffect(() => { setWeek(defaultWeek); }, [defaultWeek]);
+
+  useEffect(() => {
+    if (!league || !week) return;
+    let cancel = false;
+    setLoading(true); setErr(null);
+    fetchJson(`${API}/league/${league.league_id}/matchups/${week}`)
+      .then(data => { if (!cancel) setMatchups(data || []); })
+      .catch(e => { if (!cancel) setErr(e.message); })
+      .finally(() => { if (!cancel) setLoading(false); });
+    return () => { cancel = true; };
+  }, [league, week]);
+
+  const grouped = useMemo(() => {
+    if (!matchups) return [];
+    const map = {};
+    matchups.forEach(m => {
+      const k = m.matchup_id ?? `solo-${m.roster_id}`;
+      if (!map[k]) map[k] = [];
+      map[k].push(m);
+    });
+    return Object.values(map);
+  }, [matchups]);
+
+  const weeks = Array.from({ length: 18 }, (_, i) => i + 1);
+
+  return (
+    <div>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 16 }}>
+        <div style={{ fontSize: 10, letterSpacing: '0.15em', textTransform: 'uppercase', color: C.fgSubtle, fontWeight: 700 }}>Week</div>
+        <select className="sd-input" value={week} onChange={e => setWeek(parseInt(e.target.value, 10))} style={{ width: 90 }}>
+          {weeks.map(w => <option key={w} value={w}>{w}</option>)}
+        </select>
+        <button className="sd-btn-ghost sd-btn" onClick={() => setWeek(w => Math.max(1, w - 1))} disabled={week <= 1}>← Prev</button>
+        <button className="sd-btn-ghost sd-btn" onClick={() => setWeek(w => Math.min(18, w + 1))} disabled={week >= 18}>Next →</button>
+      </div>
+
+      {err && <ErrorBox msg={err} />}
+
+      {loading ? (
+        <div className="sd-card" style={{ padding: 24 }}><Skeleton h={20} w="40%" /></div>
+      ) : !matchups || matchups.length === 0 ? (
+        <Empty title="No matchup data" hint={`Nothing recorded for week ${week} yet. Try a different week, or check back once games kick off.`} />
+      ) : (
+        <div style={{ display: 'grid', gap: 12 }}>
+          {grouped.map((pair, idx) => (
+            <MatchupCard
+              key={idx}
+              pair={pair}
+              teamNameOf={teamNameOf}
+              userByRosterId={userByRosterId}
+              myRosterId={myRosterId}
+              playersDb={playersDb}
+              league={league}
+            />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+};
+
+const MatchupCard = ({ pair, teamNameOf, userByRosterId, myRosterId, playersDb, league }) => {
+  const [open, setOpen] = useState(false);
+  const [a, b] = pair;
+  const aIsMe = a?.roster_id === myRosterId;
+  const bIsMe = b?.roster_id === myRosterId;
+  const involved = aIsMe || bIsMe;
+  const positions = league.roster_positions || [];
+
+  return (
+    <div className="sd-card" style={{ overflow: 'hidden', borderColor: involved ? C.accent : C.border }}>
+      <button
+        onClick={() => setOpen(!open)}
+        style={{ width: '100%', padding: 16, background: 'transparent', border: 'none', cursor: 'pointer', textAlign: 'left' }}
+      >
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr auto 1fr', alignItems: 'center', gap: 16 }}>
+          <MatchupSide m={a} isMe={aIsMe} userByRosterId={userByRosterId} teamNameOf={teamNameOf} align="right" />
+          <div className="sd-display" style={{ fontSize: 12, color: C.fgSubtle, letterSpacing: '0.15em' }}>VS</div>
+          <MatchupSide m={b} isMe={bIsMe} userByRosterId={userByRosterId} teamNameOf={teamNameOf} align="left" />
+        </div>
+      </button>
+      {open && playersDb && (
+        <div className="sd-fade-in" style={{ borderTop: `1px solid ${C.border}`, padding: 16, display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 24 }}>
+          <LineupCol m={a} playersDb={playersDb} positions={positions} />
+          <LineupCol m={b} playersDb={playersDb} positions={positions} />
+        </div>
+      )}
+    </div>
+  );
+};
+
+const MatchupSide = ({ m, isMe, userByRosterId, teamNameOf, align }) => {
+  if (!m) return <div />;
+  const u = userByRosterId[m.roster_id];
+  return (
+    <div style={{ display: 'flex', alignItems: 'center', gap: 12, justifyContent: align === 'right' ? 'flex-end' : 'flex-start' }}>
+      {align === 'left' && <Avatar url={avatarUrl(u?.avatar)} name={u?.display_name} size={36} />}
+      <div style={{ textAlign: align === 'right' ? 'right' : 'left' }}>
+        <div style={{ fontSize: 14, fontWeight: 700, color: isMe ? C.accent : C.fg }}>{teamNameOf(m.roster_id)}</div>
+        <div className="sd-mono" style={{ fontSize: 22, fontWeight: 700, marginTop: 2 }}>{fmtPts(m.points)}</div>
+      </div>
+      {align === 'right' && <Avatar url={avatarUrl(u?.avatar)} name={u?.display_name} size={36} />}
+    </div>
+  );
+};
+
+const LineupCol = ({ m, playersDb, positions }) => {
+  if (!m) return null;
+  const starters = m.starters || [];
+  const playersPoints = m.players_points || {};
+  return (
+    <div>
+      <div style={{ fontSize: 10, letterSpacing: '0.15em', textTransform: 'uppercase', color: C.fgSubtle, fontWeight: 700, marginBottom: 10 }}>
+        Starters
+      </div>
+      <div style={{ display: 'grid', gap: 4 }}>
+        {starters.map((pid, i) => (
+          <PlayerRow key={`${pid}-${i}`} player={playersDb[pid]} slot={positions[i]} pid={pid} points={playersPoints[pid]} />
+        ))}
+      </div>
+    </div>
+  );
+};
+
+/* ============================================================
+   TRANSACTIONS
+   ============================================================ */
+const TransactionsView = ({ league, teamNameOf, playersDb, loadingPlayers, nflState }) => {
+  const [weeksLoaded, setWeeksLoaded] = useState(0);
+  const [all, setAll] = useState([]);
+  const [loading, setLoading] = useState(false);
+  const [err, setErr] = useState(null);
+
+  const maxWeek = useMemo(() => {
+    if (league.season === String(nflState?.season || '') && nflState?.week) return Math.max(1, nflState.week);
+    return 18;
+  }, [league, nflState]);
+
+  useEffect(() => {
+    if (!league) return;
+    let cancel = false;
+    setAll([]); setLoading(true); setErr(null); setWeeksLoaded(0);
+    (async () => {
+      const collected = [];
+      try {
+        for (let w = 1; w <= maxWeek; w++) {
+          if (cancel) return;
+          const txs = await fetchJson(`${API}/league/${league.league_id}/transactions/${w}`);
+          if (txs) collected.push(...txs.map(t => ({ ...t, _week: w })));
+          if (!cancel) setWeeksLoaded(w);
+        }
+        if (!cancel) {
+          collected.sort((a, b) => (b.created || 0) - (a.created || 0));
+          setAll(collected);
+        }
+      } catch (e) {
+        if (!cancel) setErr(e.message);
+      } finally {
+        if (!cancel) setLoading(false);
+      }
+    })();
+    return () => { cancel = true; };
+  }, [league, maxWeek]);
+
+  if (err) return <ErrorBox msg={err} />;
+
+  return (
+    <div>
+      {loading && (
+        <div style={{ fontSize: 12, color: C.fgMuted, marginBottom: 12 }}>
+          Loading transactions… week {weeksLoaded} / {maxWeek}
+        </div>
+      )}
+      {all.length === 0 && !loading ? (
+        <Empty title="No transactions" hint="No trades, waiver claims, or free-agent moves recorded yet." />
+      ) : (
+        <div style={{ display: 'grid', gap: 8 }}>
+          {all.map(tx => (
+            <TransactionCard key={tx.transaction_id} tx={tx} teamNameOf={teamNameOf} playersDb={playersDb} />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+};
+
+const TransactionCard = ({ tx, teamNameOf, playersDb }) => {
+  const typeMap = {
+    trade: { label: 'Trade', color: C.accent, bg: '#f9e7d8' },
+    waiver: { label: 'Waiver', color: '#1f3f63', bg: '#dde7f1' },
+    free_agent: { label: 'Free Agent', color: '#2e5c3a', bg: '#dfead8' },
+    commissioner: { label: 'Commish', color: '#4a2c7a', bg: '#e8defa' },
+  };
+  const t = typeMap[tx.type] || typeMap.free_agent;
+  const status = tx.status === 'complete' ? null : tx.status;
+
+  const adds = tx.adds || {};
+  const drops = tx.drops || {};
+  const teams = tx.roster_ids || [];
+
+  return (
+    <div className="sd-card" style={{ padding: 14, opacity: status === 'failed' ? 0.55 : 1 }}>
+      <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 12, marginBottom: 8 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+          <span className="sd-pill" style={{ background: t.bg, color: t.color }}>{t.label}</span>
+          <span className="sd-pill" style={{ background: C.bgAlt, color: C.fgMuted }}>Wk {tx._week}</span>
+          {status && <span className="sd-pill" style={{ background: '#fbe9e9', color: C.danger }}>{status}</span>}
+          <span style={{ fontSize: 11, color: C.fgSubtle }}>{fmtDate(tx.created)}</span>
+        </div>
+      </div>
+
+      <div style={{ display: 'grid', gridTemplateColumns: teams.length > 1 ? 'repeat(auto-fit, minmax(220px, 1fr))' : '1fr', gap: 12 }}>
+        {teams.map(rid => {
+          const teamAdds = Object.entries(adds).filter(([_, r]) => r === rid).map(([pid]) => pid);
+          const teamDrops = Object.entries(drops).filter(([_, r]) => r === rid).map(([pid]) => pid);
+          const budget = (tx.waiver_budget || []).filter(b => b.sender === rid || b.receiver === rid);
+          return (
+            <div key={rid} style={{ background: C.bgAlt, padding: 10, borderRadius: 3 }}>
+              <div style={{ fontSize: 12, fontWeight: 700, marginBottom: 6 }}>{teamNameOf(rid)}</div>
+              {teamAdds.map(pid => (
+                <div key={`a-${pid}`} style={{ fontSize: 12, color: C.success, display: 'flex', alignItems: 'center', gap: 6, marginBottom: 2 }}>
+                  <span style={{ fontWeight: 700 }}>+</span> {playerLabel(playersDb, pid)}
+                </div>
+              ))}
+              {teamDrops.map(pid => (
+                <div key={`d-${pid}`} style={{ fontSize: 12, color: C.danger, display: 'flex', alignItems: 'center', gap: 6, marginBottom: 2 }}>
+                  <span style={{ fontWeight: 700 }}>−</span> {playerLabel(playersDb, pid)}
+                </div>
+              ))}
+              {budget.map((b, i) => (
+                <div key={`b-${i}`} style={{ fontSize: 11, color: C.fgMuted, marginTop: 4 }}>
+                  FAAB: ${b.amount} {b.sender === rid ? `→ ${teamNameOf(b.receiver)}` : `← ${teamNameOf(b.sender)}`}
+                </div>
+              ))}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+};
+
+const playerLabel = (db, pid) => {
+  if (!db || !db[pid]) return `Player ${pid}`;
+  const p = db[pid];
+  const name = p.full_name || `${p.first_name || ''} ${p.last_name || ''}`.trim() || p.last_name;
+  return `${name} (${p.position} · ${p.team || 'FA'})`;
+};
+
+/* ============================================================
+   DRAFT
+   ============================================================ */
+const DraftView = ({ league, teamNameOf, userByRosterId, myRosterId, playersDb, loadingPlayers }) => {
+  const [draft, setDraft] = useState(null);
+  const [picks, setPicks] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [err, setErr] = useState(null);
+
+  useEffect(() => {
+    if (!league?.draft_id) return;
+    let cancel = false;
+    setLoading(true); setErr(null);
+    Promise.all([
+      fetchJson(`${API}/draft/${league.draft_id}`),
+      fetchJson(`${API}/draft/${league.draft_id}/picks`),
+    ]).then(([d, p]) => {
+      if (cancel) return;
+      setDraft(d); setPicks(p || []);
+    }).catch(e => { if (!cancel) setErr(e.message); })
+      .finally(() => { if (!cancel) setLoading(false); });
+    return () => { cancel = true; };
+  }, [league]);
+
+  if (!league?.draft_id) return <Empty title="No draft attached" />;
+  if (err) return <ErrorBox msg={err} />;
+  if (loading || (loadingPlayers && !playersDb)) {
+    return <div className="sd-card" style={{ padding: 24 }}><Skeleton h={20} w="40%" /></div>;
+  }
+  if (!draft || !picks) return null;
+
+  if (picks.length === 0) {
+    return (
+      <Empty
+        title={`Draft ${draft.status === 'pre_draft' ? 'not yet held' : draft.status}`}
+        hint={draft.start_time ? `Scheduled: ${fmtDate(draft.start_time)}` : 'No picks recorded yet.'}
+      />
+    );
+  }
+
+  // Group picks by round
+  const byRound = {};
+  picks.forEach(p => { (byRound[p.round] ||= []).push(p); });
+  const rounds = Object.keys(byRound).map(Number).sort((a, b) => a - b);
+
+  return (
+    <div>
+      <div className="sd-card" style={{ padding: 16, marginBottom: 16, display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))', gap: 16 }}>
+        <Stat label="Type" value={draft.type || '—'} />
+        <Stat label="Status" value={(draft.status || '').replace(/_/g, ' ')} />
+        <Stat label="Rounds" value={draft.settings?.rounds || rounds.length} />
+        <Stat label="Picks Made" value={picks.length} />
+        <Stat label="Started" value={fmtDate(draft.start_time)} />
+      </div>
+
+      <div style={{ display: 'grid', gap: 16 }}>
+        {rounds.map(rd => (
+          <div key={rd} className="sd-card" style={{ padding: 14 }}>
+            <div className="sd-display" style={{ fontSize: 18, fontWeight: 600, marginBottom: 10 }}>Round {rd}</div>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(220px, 1fr))', gap: 6 }}>
+              {byRound[rd].sort((a, b) => a.pick_no - b.pick_no).map(pk => {
+                const isMe = pk.roster_id === myRosterId;
+                const p = playersDb?.[pk.player_id];
+                const name = p ? (p.full_name || `${p.first_name || ''} ${p.last_name || ''}`.trim()) : (pk.metadata?.first_name ? `${pk.metadata.first_name} ${pk.metadata.last_name}` : `Player ${pk.player_id}`);
+                const pos = p?.position || pk.metadata?.position || '?';
+                return (
+                  <div key={pk.pick_no} style={{ padding: 8, background: isMe ? '#fbeadc' : C.bgAlt, borderRadius: 3, border: isMe ? `1px solid ${C.accent}` : '1px solid transparent' }}>
+                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 4 }}>
+                      <span className="sd-mono" style={{ fontSize: 10, color: C.fgSubtle, fontWeight: 700 }}>{pk.round}.{String(pk.draft_slot).padStart(2, '0')} · #{pk.pick_no}</span>
+                      <PosTag pos={pos} />
+                    </div>
+                    <div style={{ fontSize: 13, fontWeight: 700, marginBottom: 2 }}>{name}</div>
+                    <div style={{ fontSize: 11, color: C.fgSubtle }}>→ {teamNameOf(pk.roster_id)}</div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+};
+
+const Stat = ({ label, value }) => (
+  <div>
+    <div style={{ fontSize: 10, letterSpacing: '0.12em', textTransform: 'uppercase', color: C.fgSubtle, fontWeight: 700, marginBottom: 4 }}>{label}</div>
+    <div className="sd-display" style={{ fontSize: 18, fontWeight: 600, textTransform: 'capitalize' }}>{value || '—'}</div>
+  </div>
+);
+
+/* ============================================================
+   SCHEDULE (computed from matchups across all weeks)
+   ============================================================ */
+const ScheduleView = ({ league, teamNameOf, myRosterId, nflState }) => {
+  const [schedule, setSchedule] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [err, setErr] = useState(null);
+  const [progress, setProgress] = useState(0);
+  const [filterMine, setFilterMine] = useState(true);
+
+  const regWeeks = league.settings?.playoff_week_start ? league.settings.playoff_week_start - 1 : 14;
+
+  useEffect(() => {
+    if (!league) return;
+    let cancel = false;
+    setLoading(true); setErr(null); setSchedule(null); setProgress(0);
+    (async () => {
+      const weeks = [];
+      try {
+        for (let w = 1; w <= regWeeks; w++) {
+          if (cancel) return;
+          const data = await fetchJson(`${API}/league/${league.league_id}/matchups/${w}`);
+          weeks.push({ week: w, matchups: data || [] });
+          if (!cancel) setProgress(w);
+        }
+        if (!cancel) setSchedule(weeks);
+      } catch (e) {
+        if (!cancel) setErr(e.message);
+      } finally {
+        if (!cancel) setLoading(false);
+      }
+    })();
+    return () => { cancel = true; };
+  }, [league, regWeeks]);
+
+  if (err) return <ErrorBox msg={err} />;
+  if (loading) {
+    return (
+      <div className="sd-card" style={{ padding: 24 }}>
+        <div style={{ fontSize: 13, color: C.fgMuted }}>Loading schedule… week {progress} / {regWeeks}</div>
+        <div style={{ marginTop: 12 }}><Skeleton h={6} w={`${(progress / regWeeks) * 100}%`} /></div>
+      </div>
+    );
+  }
+  if (!schedule) return null;
+
+  // If schedule data is empty across all weeks, show empty state
+  const totalMatchups = schedule.reduce((sum, w) => sum + w.matchups.length, 0);
+  if (totalMatchups === 0) {
+    return <Empty title="Schedule not set" hint="The season hasn't started, so matchups haven't been generated yet." />;
+  }
+
+  return (
+    <div>
+      {myRosterId && (
+        <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 14 }}>
+          <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 13, cursor: 'pointer' }}>
+            <input type="checkbox" checked={filterMine} onChange={e => setFilterMine(e.target.checked)} />
+            Only my matchups
+          </label>
+        </div>
+      )}
+
+      <div style={{ display: 'grid', gap: 8 }}>
+        {schedule.map(({ week, matchups }) => {
+          const map = {};
+          matchups.forEach(m => { (map[m.matchup_id] ||= []).push(m); });
+          let pairs = Object.values(map);
+          if (filterMine && myRosterId) {
+            pairs = pairs.filter(p => p.some(m => m.roster_id === myRosterId));
+            if (pairs.length === 0) return null;
+          }
+          return (
+            <div key={week} className="sd-card" style={{ padding: 14 }}>
+              <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', marginBottom: 10 }}>
+                <div className="sd-display" style={{ fontSize: 16, fontWeight: 600 }}>Week {week}</div>
+                <div style={{ fontSize: 11, color: C.fgSubtle }}>{pairs.length} {pairs.length === 1 ? 'matchup' : 'matchups'}</div>
+              </div>
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))', gap: 8 }}>
+                {pairs.map((pair, i) => {
+                  const [a, b] = pair;
+                  const aIsMe = a?.roster_id === myRosterId;
+                  const bIsMe = b?.roster_id === myRosterId;
+                  const involved = aIsMe || bIsMe;
+                  const played = (a?.points || 0) + (b?.points || 0) > 0;
+                  let result = null;
+                  if (played && a && b && involved) {
+                    const myM = aIsMe ? a : b;
+                    const oppM = aIsMe ? b : a;
+                    if (myM.points > oppM.points) result = 'W';
+                    else if (myM.points < oppM.points) result = 'L';
+                    else result = 'T';
+                  }
+                  return (
+                    <div key={i} style={{ padding: 10, background: involved ? '#fbeadc' : C.bgAlt, borderRadius: 3, border: involved ? `1px solid ${C.accent}` : '1px solid transparent' }}>
+                      <div style={{ display: 'grid', gridTemplateColumns: '1fr auto', gap: 4, alignItems: 'center' }}>
+                        <span style={{ fontSize: 13, fontWeight: aIsMe ? 700 : 500, color: aIsMe ? C.accent : C.fg, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{teamNameOf(a?.roster_id)}</span>
+                        <span className="sd-mono" style={{ fontWeight: 700, fontSize: 13 }}>{played ? fmtPts(a?.points) : '—'}</span>
+                        <span style={{ fontSize: 13, fontWeight: bIsMe ? 700 : 500, color: bIsMe ? C.accent : C.fg, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{teamNameOf(b?.roster_id)}</span>
+                        <span className="sd-mono" style={{ fontWeight: 700, fontSize: 13 }}>{played ? fmtPts(b?.points) : '—'}</span>
+                      </div>
+                      {result && (
+                        <div style={{ marginTop: 6, fontSize: 10, letterSpacing: '0.15em', textTransform: 'uppercase', fontWeight: 700, color: result === 'W' ? C.success : result === 'L' ? C.danger : C.fgMuted }}>
+                          {result === 'W' ? 'Won' : result === 'L' ? 'Lost' : 'Tied'}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+};
+
+/* ============================================================
+   VALUES & TRENDS — FantasyCalc trade values + Sleeper trending
+   ============================================================ */
+
+// Parse FantasyCalc pick names like "2026 Mid 1st", "2026 Early 1st", "2026 1st",
+// "2026 1.05", "Pick 1.01 2026", "2026 Round 1", "2026 Rookie 1st", etc.
+const parsePickName = (name) => {
+  if (!name || typeof name !== 'string') return null;
+  // Year: any 20XX between 2020-2049
+  const yearMatch = name.match(/(20[2-4]\d)/);
+  if (!yearMatch) return null;
+  const season = yearMatch[1];
+  // Tier: Early/Mid/Late (case-insensitive, anywhere in string)
+  const tierMatch = name.match(/\b(early|mid|late)\b/i);
+  const tier = tierMatch ? tierMatch[1].toLowerCase() : null;
+  // Round: try multiple patterns in priority order
+  let round = null;
+  let slot = null;
+  // Pattern A: ordinal — "1st", "2nd", "3rd", "4th", "5th"
+  let m = name.match(/\b(\d{1,2})(?:st|nd|rd|th)\b/i);
+  if (m) {
+    const r = parseInt(m[1], 10);
+    if (r >= 1 && r <= 7) round = r;
+  }
+  // Pattern B: round.slot — "1.05", "Pick 2.10"
+  if (!round) {
+    m = name.match(/(\d{1,2})\.(\d{1,2})/);
+    if (m) {
+      const r = parseInt(m[1], 10), s = parseInt(m[2], 10);
+      if (r >= 1 && r <= 7) { round = r; slot = s; }
+    }
+  }
+  // Pattern C: explicit "Round X" / "Rd X" / "R X"
+  if (!round) {
+    m = name.match(/\br(?:ound|d)?\.?\s*(\d{1,2})\b/i);
+    if (m) {
+      const r = parseInt(m[1], 10);
+      if (r >= 1 && r <= 7) round = r;
+    }
+  }
+  if (!round) return null;
+  return { season, tier, round, slot };
+};
+
+// Map draft slot (1-N) to tier label given league size; splits into thirds
+const slotToTier = (slot, totalTeams) => {
+  if (!slot || !totalTeams) return 'mid';
+  const earlyMax = Math.ceil(totalTeams / 3);
+  const midMax = Math.ceil((totalTeams * 2) / 3);
+  if (slot <= earlyMax) return 'early';
+  if (slot <= midMax) return 'mid';
+  return 'late';
+};
+
+// In a snake draft, even rounds reverse the order
+const effectiveSlot = (slot, round, totalTeams, isSnake) => {
+  if (!isSnake || round % 2 === 1) return slot;
+  return totalTeams - slot + 1;
+};
+
+const ordinal = (n) => {
+  const s = ['th', 'st', 'nd', 'rd'];
+  const v = n % 100;
+  return n + (s[(v - 20) % 10] || s[v] || s[0]);
+};
+
+const ValuesTrendsView = ({ league, rosters, teamNameOf, userByRosterId, myRosterId, playersDb, loadingPlayers, ensurePlayers }) => {
+  const [values, setValues] = useState(null);
+  const [trendAdd, setTrendAdd] = useState(null);
+  const [trendDrop, setTrendDrop] = useState(null);
+  const [tradedPicks, setTradedPicks] = useState(null);
+  const [previousRosters, setPreviousRosters] = useState([]);
+  const [draftType, setDraftType] = useState('snake');
+  const [loading, setLoading] = useState(false);
+  const [err, setErr] = useState(null);
+
+  // Derive FantasyCalc params from league settings — DYNASTY mode
+  const fcParams = useMemo(() => {
+    const scoring = league.scoring_settings || {};
+    const rec = scoring.rec || 0;
+    const ppr = rec >= 1 ? 1 : rec >= 0.5 ? 0.5 : 0;
+    const isSuperflex = (league.roster_positions || []).includes('SUPER_FLEX');
+    const teams = league.total_rosters || 12;
+    const validTeamCounts = [8, 10, 12, 14, 16];
+    const numTeams = validTeamCounts.reduce((closest, t) =>
+      Math.abs(t - teams) < Math.abs(closest - teams) ? t : closest, 12);
+    return { isDynasty: true, numQbs: isSuperflex ? 2 : 1, numTeams, ppr };
+  }, [league]);
+
+  useEffect(() => {
+    if (!league) return;
+    let cancel = false;
+    setLoading(true); setErr(null);
+    ensurePlayers();
+    const url = `${FANTASYCALC_API}?isDynasty=${fcParams.isDynasty}&numQbs=${fcParams.numQbs}&numTeams=${fcParams.numTeams}&ppr=${fcParams.ppr}`;
+    Promise.all([
+      fetchJson(url),
+      fetchJson(`${API}/players/nfl/trending/add?lookback_hours=24&limit=25`),
+      fetchJson(`${API}/players/nfl/trending/drop?lookback_hours=24&limit=15`),
+      fetchJson(`${API}/league/${league.league_id}/traded_picks`).catch(() => []),
+      league.previous_league_id ? fetchJson(`${API}/league/${league.previous_league_id}/rosters`).catch(() => []) : Promise.resolve([]),
+      league.draft_id ? fetchJson(`${API}/draft/${league.draft_id}`).catch(() => null) : Promise.resolve(null),
+    ]).then(([v, ta, td, tp, prevR, draft]) => {
+      if (cancel) return;
+      setValues(Array.isArray(v) ? v : []);
+      setTrendAdd(ta || []);
+      setTrendDrop(td || []);
+      setTradedPicks(tp || []);
+      setPreviousRosters(prevR || []);
+      setDraftType(draft?.type || 'snake');
+    }).catch(e => { if (!cancel) setErr(e.message); })
+      .finally(() => { if (!cancel) setLoading(false); });
+    return () => { cancel = true; };
+  }, [league, fcParams.isDynasty, fcParams.numQbs, fcParams.numTeams, fcParams.ppr, ensurePlayers]);
+
+  // Split values: players (have sleeperId) vs picks (have parseable name)
+  // Build a nested lookup: pickValueByYearRound[year][round][tier] = value
+  // Also track diagnostic counts so we can surface parse failures to the user.
+  const { playerValueOf, pickValueByYRT, pickAvgByYearRound, diagnostics } = useMemo(() => {
+    const playerMap = {};
+    const pickByYRT = {};
+    const pickGroups = {};
+    const unparsedPickNames = [];
+    let playerCount = 0;
+    let pickCount = 0;
+    let nonPlayerEntries = 0;
+
+    (values || []).forEach(v => {
+      const sid = v.player?.sleeperId;
+      const pos = v.player?.position;
+      const isPickByMarker = !sid || pos === 'PICK' || pos === 'RDP';
+      if (sid && !isPickByMarker) {
+        // It's a real player
+        playerMap[sid] = { value: v.value, overallRank: v.overallRank, positionRank: v.positionRank, trend30: v.trend30Day };
+        playerCount++;
+      } else {
+        // Treat as pick
+        nonPlayerEntries++;
+        const parsed = parsePickName(v.player?.name || '');
+        if (parsed) {
+          const { season, round, tier, slot } = parsed;
+          if (!pickByYRT[season]) pickByYRT[season] = {};
+          if (!pickByYRT[season][round]) pickByYRT[season][round] = {};
+          const teams = fcParams.numTeams;
+          const tierKey = tier || (slot ? slotToTier(slot, teams) : 'mid');
+          pickByYRT[season][round][tierKey] = v.value;
+          (pickGroups[`${season}-${round}`] ||= []).push(v.value);
+          pickCount++;
+        } else if (v.player?.name) {
+          unparsedPickNames.push(v.player.name);
+        }
+      }
+    });
+
+    const avg = {};
+    Object.entries(pickGroups).forEach(([key, arr]) => {
+      avg[key] = arr.reduce((s, n) => s + n, 0) / arr.length;
+    });
+
+    return {
+      playerValueOf: playerMap,
+      pickValueByYRT: pickByYRT,
+      pickAvgByYearRound: avg,
+      diagnostics: { playerCount, pickCount, nonPlayerEntries, unparsedPickNames, sampleUnparsed: unparsedPickNames.slice(0, 3) },
+    };
+  }, [values, fcParams.numTeams]);
+
+  // Compute draft order for each year of future picks
+  // - N+1 picks (next draft): use current league in-progress standings (worst → pick 1)
+  //   Falls back to prior-year standings (via previous_league_id rosters) if no games played yet
+  // - N+2 picks (year after next): use prior-year standings as best available proxy
+  const { draftOrders, orderSource } = useMemo(() => {
+    const currentYear = parseInt(league.season || '2025', 10);
+    const totalTeams = rosters.length;
+
+    const orderFromRosterList = (rs) => {
+      const sorted = [...rs].sort((a, b) => {
+        const aw = a.settings?.wins || 0;
+        const bw = b.settings?.wins || 0;
+        if (aw !== bw) return aw - bw; // worst record first
+        const af = (a.settings?.fpts || 0) + (a.settings?.fpts_decimal || 0) / 100;
+        const bf = (b.settings?.fpts || 0) + (b.settings?.fpts_decimal || 0) / 100;
+        return af - bf; // lower points scored first (worse team)
+      });
+      const order = {};
+      sorted.forEach((r, i) => { order[r.roster_id] = i + 1; });
+      return order;
+    };
+
+    // Build prior-year projection: each current roster mapped to their owner's prior settings
+    const prevByOwner = {};
+    previousRosters.forEach(r => { if (r.owner_id) prevByOwner[r.owner_id] = r; });
+    const priorProjection = rosters.map(r => {
+      const prev = prevByOwner[r.owner_id];
+      return {
+        roster_id: r.roster_id,
+        settings: prev?.settings || r.settings || {}, // new owners fall back to current
+        _hasPrev: !!prev,
+      };
+    });
+
+    const hasGames = rosters.some(r => (r.settings?.wins || 0) + (r.settings?.losses || 0) > 0);
+    const orders = {};
+    const sources = {};
+
+    // N+1: current standings if games played; else prior-year projection
+    if (hasGames) {
+      orders[currentYear + 1] = orderFromRosterList(rosters);
+      sources[currentYear + 1] = 'Current season standings (in-progress)';
+    } else if (previousRosters.length > 0) {
+      orders[currentYear + 1] = orderFromRosterList(priorProjection);
+      sources[currentYear + 1] = 'Prior season (final standings) — projection';
+    } else {
+      orders[currentYear + 1] = orderFromRosterList(rosters);
+      sources[currentYear + 1] = 'Current rosters (no prior data)';
+    }
+
+    // N+2: prior year projection
+    if (previousRosters.length > 0) {
+      orders[currentYear + 2] = orderFromRosterList(priorProjection);
+      sources[currentYear + 2] = 'Prior season — long-range projection';
+    } else if (hasGames) {
+      orders[currentYear + 2] = orderFromRosterList(rosters);
+      sources[currentYear + 2] = 'Current season — long-range projection';
+    } else {
+      orders[currentYear + 2] = orderFromRosterList(rosters);
+      sources[currentYear + 2] = 'Current rosters (no prior data)';
+    }
+    return { draftOrders: orders, orderSource: sources };
+  }, [rosters, previousRosters, league]);
+
+  // Slot-aware value lookup for a pick: factors in standings projection + snake flipping
+  const valueForPick = useCallback((season, round, originalRoster) => {
+    const order = draftOrders[parseInt(season, 10)];
+    const slot = order?.[originalRoster];
+    const totalTeams = rosters.length || 12;
+    const isSnake = draftType === 'snake';
+    const effSlot = slot ? effectiveSlot(slot, round, totalTeams, isSnake) : null;
+    const tier = effSlot ? slotToTier(effSlot, totalTeams) : 'mid';
+    const yrRound = pickValueByYRT[season]?.[round];
+    if (yrRound) {
+      return {
+        value: yrRound[tier] ?? yrRound.mid ?? yrRound.early ?? yrRound.late ?? (pickAvgByYearRound[`${season}-${round}`] || 0),
+        slot, effSlot, tier,
+      };
+    }
+    return { value: pickAvgByYearRound[`${season}-${round}`] || 0, slot, effSlot, tier };
+  }, [draftOrders, draftType, rosters, pickValueByYRT, pickAvgByYearRound]);
+
+  // Compute pick ownership per roster, with slot-specific values
+  // CRITICAL: use the years that FantasyCalc actually returned values for,
+  // not hardcoded [N+1, N+2]. FantasyCalc may return different years depending
+  // on whether the current season's rookie draft has happened, etc.
+  const { pickOwnership, pickYears } = useMemo(() => {
+    if (!rosters || rosters.length === 0) return { pickOwnership: {}, pickYears: [] };
+    const currentYear = parseInt(league.season || '2025', 10);
+
+    // Years that FantasyCalc has values for — these are the years we trust
+    const fcYears = Object.keys(pickValueByYRT)
+      .map(s => parseInt(s, 10))
+      .filter(y => !isNaN(y) && y >= currentYear && y <= currentYear + 5)
+      .sort((a, b) => a - b);
+
+    // If FC returned years, use them. Otherwise fall back to N+1, N+2.
+    const years = fcYears.length > 0 ? fcYears.slice(0, 3) : [currentYear + 1, currentYear + 2];
+    const ROOKIE_ROUNDS = 4;
+
+    const tradeMap = {};
+    (tradedPicks || []).forEach(t => {
+      const key = `${t.season}-${t.round}-${t.roster_id}`;
+      tradeMap[key] = t.owner_id;
+    });
+
+    const ownership = {};
+    rosters.forEach(r => { ownership[r.roster_id] = []; });
+
+    years.forEach(yr => {
+      for (let rd = 1; rd <= ROOKIE_ROUNDS; rd++) {
+        rosters.forEach(r => {
+          const key = `${yr}-${rd}-${r.roster_id}`;
+          const ownerId = tradeMap[key] !== undefined ? tradeMap[key] : r.roster_id;
+          const info = valueForPick(String(yr), rd, r.roster_id);
+          if (!ownership[ownerId]) ownership[ownerId] = [];
+          ownership[ownerId].push({
+            season: String(yr),
+            round: rd,
+            originalRoster: r.roster_id,
+            value: info.value,
+            slot: info.slot,
+            effSlot: info.effSlot,
+            tier: info.tier,
+            traded: tradeMap[key] !== undefined,
+          });
+        });
+      }
+    });
+    return { pickOwnership: ownership, pickYears: years };
+  }, [tradedPicks, rosters, league, valueForPick, pickValueByYRT]);
+
+  // Generic pick items for trade comparator (averaged value)
+  const pickItems = useMemo(() => {
+    const items = [];
+    pickYears.forEach(yr => {
+      for (let rd = 1; rd <= 4; rd++) {
+        const value = pickAvgByYearRound[`${yr}-${rd}`] || 0;
+        items.push({
+          id: `pick:${yr}:${rd}`,
+          name: `${yr} ${ordinal(rd)} Round Pick`,
+          shortName: `${yr} ${ordinal(rd)}`,
+          season: String(yr),
+          round: rd,
+          value,
+          isPick: true,
+        });
+      }
+    });
+    return items;
+  }, [pickYears, pickAvgByYearRound]);
+
+  if (err) return <ErrorBox msg={err} />;
+  if (loading || (loadingPlayers && !playersDb)) {
+    return (
+      <div className="sd-card" style={{ padding: 24 }}>
+        <Skeleton h={20} w="40%" />
+        <div style={{ marginTop: 12, fontSize: 12, color: C.fgMuted }}>
+          Loading dynasty values · trending · pick trades · prior season standings…
+        </div>
+      </div>
+    );
+  }
+  if (!values || values.length === 0) {
+    return <Empty title="No value data available" hint="FantasyCalc may be temporarily unreachable. Try Refresh in the header." />;
+  }
+
+  return (
+    <div style={{ display: 'grid', gap: 16 }}>
+      <SettingsBanner fcParams={fcParams} draftType={draftType} hasPrev={previousRosters.length > 0} diagnostics={diagnostics} />
+      <LeagueValueRankings rosters={rosters} valueOf={playerValueOf} teamNameOf={teamNameOf} userByRosterId={userByRosterId} myRosterId={myRosterId} pickOwnership={pickOwnership} />
+      <PicksByTeamCard rosters={rosters} pickOwnership={pickOwnership} teamNameOf={teamNameOf} myRosterId={myRosterId} pickYears={pickYears} userByRosterId={userByRosterId} orderSource={orderSource} totalTeams={rosters.length} />
+      <TopPlayersCard values={values} myRosterId={myRosterId} rosters={rosters} valueOf={playerValueOf} pickItems={pickItems} />
+      <TrendingCard trendAdd={trendAdd} trendDrop={trendDrop} playersDb={playersDb} valueOf={playerValueOf} myRosterId={myRosterId} rosters={rosters} />
+      <TradeComparatorCard playersDb={playersDb} valueOf={playerValueOf} myRosterId={myRosterId} rosters={rosters} teamNameOf={teamNameOf} pickItems={pickItems} pickAvgByYearRound={pickAvgByYearRound} />
+    </div>
+  );
+};
+
+const SettingsBanner = ({ fcParams, draftType, hasPrev, diagnostics }) => {
+  const d = diagnostics || {};
+  const parseOk = d.pickCount > 0;
+  const parseWarn = d.nonPlayerEntries > 0 && d.pickCount === 0;
+
+  return (
+    <div style={{ padding: '8px 14px', fontSize: 11, color: C.fgMuted, background: C.bgAlt, border: `1px solid ${C.border}`, borderRadius: 3 }}>
+      <div>
+        Values auto-tuned:&nbsp;
+        <strong style={{ color: C.accent }}>Dynasty</strong> ·&nbsp;
+        <strong style={{ color: C.fg }}>{fcParams.ppr >= 1 ? 'PPR' : fcParams.ppr >= 0.5 ? 'Half-PPR' : 'Standard'}</strong> ·&nbsp;
+        <strong style={{ color: C.fg }}>{fcParams.numTeams}-team</strong> ·&nbsp;
+        <strong style={{ color: C.fg }}>{fcParams.numQbs === 2 ? 'Superflex' : '1-QB'}</strong> ·&nbsp;
+        <strong style={{ color: C.fg }}>{draftType === 'snake' ? 'Snake' : 'Linear'}</strong> rookie draft ·&nbsp;
+        Pick values: {hasPrev ? 'prior-year + current standings' : 'current standings only'} · Source: FantasyCalc
+      </div>
+      {diagnostics && (
+        <div style={{ marginTop: 4, fontSize: 10, color: parseWarn ? C.danger : C.fgSubtle }}>
+          <span className="sd-mono">
+            Parsed: {d.playerCount} players · {d.pickCount} picks{parseOk ? ' ✓' : ''}
+            {d.nonPlayerEntries > d.pickCount && (
+              <span style={{ color: C.danger, marginLeft: 8 }}>
+                ({d.nonPlayerEntries - d.pickCount} pick entries couldn't be parsed)
+              </span>
+            )}
+          </span>
+          {parseWarn && d.sampleUnparsed?.length > 0 && (
+            <div style={{ marginTop: 2, color: C.danger }}>
+              ⚠ Pick names not recognised — examples: {d.sampleUnparsed.map(n => `"${n}"`).join(', ')}. Pick values will fall back to 0.
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+};
+
+const LeagueValueRankings = ({ rosters, valueOf, teamNameOf, userByRosterId, myRosterId, pickOwnership }) => {
+  const ranked = useMemo(() => {
+    return [...rosters].map(r => {
+      const players = r.players || [];
+      const starters = r.starters || [];
+      const playerTotal = players.reduce((sum, pid) => sum + (valueOf[pid]?.value || 0), 0);
+      const startersTotal = starters.reduce((sum, pid) => sum + (valueOf[pid]?.value || 0), 0);
+      const picks = pickOwnership?.[r.roster_id] || [];
+      const pickTotal = picks.reduce((sum, p) => sum + (p.value || 0), 0);
+      return { roster: r, playerTotal, pickTotal, startersTotal, total: playerTotal + pickTotal };
+    }).sort((a, b) => b.total - a.total);
+  }, [rosters, valueOf, pickOwnership]);
+
+  if (ranked.length === 0) return null;
+  const maxTotal = ranked[0].total || 1;
+
+  return (
+    <div className="sd-card" style={{ overflow: 'hidden' }}>
+      <div style={{ padding: '14px 16px', borderBottom: `1px solid ${C.border}`, display: 'flex', alignItems: 'baseline', justifyContent: 'space-between' }}>
+        <div className="sd-display" style={{ fontSize: 18, fontWeight: 600 }}>Roster Value — League Rankings</div>
+        <div style={{ fontSize: 11, color: C.fgSubtle }}>Players + future picks · FantasyCalc dynasty values</div>
+      </div>
+      <table className="sd-table">
+        <thead>
+          <tr>
+            <th style={{ width: 40 }}>#</th>
+            <th>Team</th>
+            <th style={{ width: '32%' }}>Total Value</th>
+            <th style={{ textAlign: 'right', width: 90 }}>Starters</th>
+            <th style={{ textAlign: 'right', width: 90 }}>Players</th>
+            <th style={{ textAlign: 'right', width: 80 }}>Picks</th>
+            <th style={{ textAlign: 'right', width: 90 }}>Total</th>
+          </tr>
+        </thead>
+        <tbody>
+          {ranked.map((row, i) => {
+            const isMe = row.roster.roster_id === myRosterId;
+            const u = userByRosterId[row.roster.roster_id];
+            const pct = (row.total / maxTotal) * 100;
+            return (
+              <tr key={row.roster.roster_id} className={`sd-row-hover ${isMe ? 'sd-row-me' : ''}`}>
+                <td><span className="sd-mono" style={{ fontSize: 13, fontWeight: 700, color: C.fgMuted }}>{i + 1}</span></td>
+                <td>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                    <Avatar url={avatarUrl(u?.avatar)} name={u?.display_name} />
+                    <span style={{ fontWeight: 600, fontSize: 13 }}>{teamNameOf(row.roster.roster_id)}</span>
+                  </div>
+                </td>
+                <td>
+                  <div style={{ background: C.bgAlt, height: 8, borderRadius: 2, overflow: 'hidden' }}>
+                    <div style={{ background: isMe ? C.accent : C.ink, height: '100%', width: `${pct}%`, transition: 'width 0.3s' }} />
+                  </div>
+                </td>
+                <td className="sd-mono" style={{ textAlign: 'right', color: C.fgMuted, fontSize: 13 }}>{Math.round(row.startersTotal).toLocaleString()}</td>
+                <td className="sd-mono" style={{ textAlign: 'right', color: C.fg, fontSize: 13 }}>{Math.round(row.playerTotal).toLocaleString()}</td>
+                <td className="sd-mono" style={{ textAlign: 'right', color: C.fgMuted, fontSize: 12 }}>{Math.round(row.pickTotal).toLocaleString()}</td>
+                <td className="sd-mono" style={{ textAlign: 'right', fontWeight: 700, fontSize: 13 }}>{Math.round(row.total).toLocaleString()}</td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+    </div>
+  );
+};
+
+const PicksByTeamCard = ({ rosters, pickOwnership, teamNameOf, myRosterId, pickYears, userByRosterId, orderSource, totalTeams }) => {
+  const [expanded, setExpanded] = useState(null);
+
+  useEffect(() => { if (myRosterId) setExpanded(myRosterId); }, [myRosterId]);
+
+  if (!pickOwnership || Object.keys(pickOwnership).length === 0) return null;
+
+  const sortedRosters = [...rosters].map(r => {
+    const picks = pickOwnership[r.roster_id] || [];
+    const total = picks.reduce((s, p) => s + (p.value || 0), 0);
+    return { roster: r, picks, total };
+  }).sort((a, b) => b.total - a.total);
+
+  return (
+    <div className="sd-card" style={{ overflow: 'hidden' }}>
+      <div style={{ padding: '14px 16px', borderBottom: `1px solid ${C.border}` }}>
+        <div className="sd-display" style={{ fontSize: 18, fontWeight: 600 }}>Future Rookie Picks by Team</div>
+        <div style={{ fontSize: 11, color: C.fgSubtle, marginTop: 4, lineHeight: 1.6 }}>
+          {pickYears.map(y => y).join(' & ')} · rounds 1–4 · Values projected by draft slot (worse standings → earlier pick → higher value)
+        </div>
+        {orderSource && (
+          <div style={{ marginTop: 6, fontSize: 10, color: C.fgSubtle }}>
+            {pickYears.map(yr => (
+              <div key={yr}>
+                <span className="sd-mono" style={{ color: C.fg }}>{yr}</span> draft order: {orderSource[yr]}
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+      <div>
+        {sortedRosters.map(({ roster, picks, total }) => {
+          const isMe = roster.roster_id === myRosterId;
+          const isOpen = expanded === roster.roster_id;
+          const u = userByRosterId[roster.roster_id];
+          const byYear = {};
+          picks.forEach(p => { (byYear[p.season] ||= []).push(p); });
+
+          return (
+            <div key={roster.roster_id} style={{ borderBottom: `1px solid ${C.border}` }}>
+              <button
+                onClick={() => setExpanded(isOpen ? null : roster.roster_id)}
+                style={{
+                  width: '100%', padding: '12px 16px', display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+                  background: isMe ? 'rgba(176,74,28,0.04)' : 'transparent', border: 'none', cursor: 'pointer', textAlign: 'left',
+                }}
+              >
+                <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                  <Avatar url={avatarUrl(u?.avatar)} name={u?.display_name} size={28} />
+                  <div>
+                    <div style={{ fontWeight: 700, fontSize: 13, color: isMe ? C.accent : C.fg }}>
+                      {teamNameOf(roster.roster_id)}{isMe && <span style={{ marginLeft: 6, fontSize: 9, letterSpacing: '0.1em', textTransform: 'uppercase', background: C.accent, color: C.bg, padding: '1px 5px', borderRadius: 2 }}>You</span>}
+                    </div>
+                    <div style={{ fontSize: 11, color: C.fgSubtle }}>{picks.length} picks</div>
+                  </div>
+                </div>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+                  <div className="sd-mono" style={{ fontSize: 14, fontWeight: 700 }}>{Math.round(total).toLocaleString()}</div>
+                  <span style={{ fontSize: 11, color: C.fgMuted }}>{isOpen ? '▼' : '▶'}</span>
+                </div>
+              </button>
+              {isOpen && (
+                <div className="sd-fade-in" style={{ padding: '4px 16px 14px', background: C.bgAlt }}>
+                  {Object.entries(byYear).sort().map(([year, yearPicks]) => (
+                    <div key={year} style={{ marginTop: 10 }}>
+                      <div style={{ fontSize: 10, letterSpacing: '0.15em', textTransform: 'uppercase', color: C.fgSubtle, fontWeight: 700, marginBottom: 6 }}>{year}</div>
+                      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(190px, 1fr))', gap: 6 }}>
+                        {yearPicks.sort((a, b) => a.round - b.round || (a.slot || 99) - (b.slot || 99)).map((p, i) => {
+                          const fromAnother = p.originalRoster !== roster.roster_id;
+                          // Pick slot notation: round.effSlot (e.g., 1.05). In snake, effSlot already accounts for round flip.
+                          const slotLabel = p.effSlot ? `${p.round}.${String(p.effSlot).padStart(2, '0')}` : `R${p.round}`;
+                          const tierLabel = p.tier ? p.tier.charAt(0).toUpperCase() + p.tier.slice(1) : '';
+                          const tierColor = p.tier === 'early' ? C.success : p.tier === 'late' ? C.danger : C.fgMuted;
+                          return (
+                            <div key={`${p.season}-${p.round}-${i}`} style={{
+                              padding: '7px 10px', background: C.card, borderRadius: 3,
+                              border: `1px solid ${fromAnother ? C.accent : C.border}`,
+                            }}>
+                              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 2 }}>
+                                <div style={{ fontSize: 12, fontWeight: 700 }}>{p.season} {ordinal(p.round)}</div>
+                                <div className="sd-mono" style={{ fontSize: 12, fontWeight: 700 }}>{Math.round(p.value).toLocaleString()}</div>
+                              </div>
+                              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: 10, color: C.fgMuted }}>
+                                <span className="sd-mono">
+                                  Proj. {slotLabel}{tierLabel && <span style={{ color: tierColor, marginLeft: 4, fontWeight: 700 }}>· {tierLabel}</span>}
+                                </span>
+                                {fromAnother && (
+                                  <span style={{ color: C.accent, fontSize: 9, textTransform: 'uppercase', letterSpacing: '0.05em', fontWeight: 700 }}>
+                                    via {teamNameOf(p.originalRoster).slice(0, 12)}
+                                  </span>
+                                )}
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+};
+
+const TopPlayersCard = ({ values, myRosterId, rosters, valueOf }) => {
+  const [pos, setPos] = useState('ALL');
+  const positions = ['ALL', 'QB', 'RB', 'WR', 'TE', 'PICK'];
+
+  // Who's on which roster
+  const ownerByPlayerId = useMemo(() => {
+    const map = {};
+    rosters.forEach(r => (r.players || []).forEach(pid => { map[pid] = r.roster_id; }));
+    return map;
+  }, [rosters]);
+
+  const filtered = useMemo(() => {
+    return (values || [])
+      .filter(v => {
+        if (pos === 'ALL') return true;
+        if (pos === 'PICK') return !v.player?.sleeperId;
+        return v.player?.position === pos && v.player?.sleeperId;
+      })
+      .slice(0, 40);
+  }, [values, pos]);
+
+  return (
+    <div className="sd-card" style={{ overflow: 'hidden' }}>
+      <div style={{ padding: '14px 16px', borderBottom: `1px solid ${C.border}` }}>
+        <div className="sd-display" style={{ fontSize: 18, fontWeight: 600, marginBottom: 10 }}>Top Assets by Trade Value</div>
+        <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+          {positions.map(p => (
+            <button key={p} onClick={() => setPos(p)} style={{
+              padding: '4px 10px', fontSize: 11, fontWeight: 700, letterSpacing: '0.05em',
+              background: pos === p ? C.ink : 'transparent', color: pos === p ? C.bg : C.fg,
+              border: `1px solid ${pos === p ? C.ink : C.border}`, borderRadius: 3, cursor: 'pointer',
+            }}>{p === 'PICK' ? 'PICKS' : p}</button>
+          ))}
+        </div>
+      </div>
+      <div style={{ maxHeight: 480, overflowY: 'auto' }} className="sd-scrollbar">
+        <table className="sd-table">
+          <thead>
+            <tr>
+              <th style={{ width: 36 }}>#</th>
+              <th>Asset</th>
+              <th style={{ width: 56 }}>Type</th>
+              <th style={{ textAlign: 'right', width: 80 }}>Value</th>
+              <th style={{ textAlign: 'right', width: 80 }}>30d Δ</th>
+              <th style={{ textAlign: 'right', width: 110 }}>Owner</th>
+            </tr>
+          </thead>
+          <tbody>
+            {filtered.map((v, i) => {
+              const p = v.player || {};
+              const sid = p.sleeperId;
+              const isPick = !sid;
+              const owner = sid ? ownerByPlayerId[sid] : null;
+              const isMyPlayer = owner === myRosterId;
+              const trend = v.trend30Day || 0;
+              return (
+                <tr key={p.id || sid || i} className="sd-row-hover">
+                  <td><span className="sd-mono" style={{ fontSize: 12, color: C.fgSubtle }}>{i + 1}</span></td>
+                  <td>
+                    <div style={{ fontWeight: 600, fontSize: 13 }}>
+                      {p.name}
+                      {isMyPlayer && <span style={{ marginLeft: 6, fontSize: 9, letterSpacing: '0.1em', textTransform: 'uppercase', background: C.accent, color: C.bg, padding: '1px 5px', borderRadius: 2 }}>You</span>}
+                    </div>
+                  </td>
+                  <td><PosTag pos={isPick ? 'PICK' : (p.position || '?')} /></td>
+                  <td className="sd-mono" style={{ textAlign: 'right', fontWeight: 700 }}>{Math.round(v.value || 0).toLocaleString()}</td>
+                  <td className="sd-mono" style={{ textAlign: 'right', color: trend > 0 ? C.success : trend < 0 ? C.danger : C.fgMuted, fontSize: 12 }}>
+                    {trend > 0 ? '+' : ''}{Math.round(trend)}
+                  </td>
+                  <td style={{ textAlign: 'right', fontSize: 11, color: C.fgSubtle }}>
+                    {isPick ? 'See Picks card' : (owner ? (isMyPlayer ? 'You' : 'Rostered') : 'Free agent')}
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+};
+
+const TrendingCard = ({ trendAdd, trendDrop, playersDb, valueOf, myRosterId, rosters }) => {
+  const ownedByMe = useMemo(() => {
+    if (!myRosterId) return new Set();
+    const my = rosters.find(r => r.roster_id === myRosterId);
+    return new Set(my?.players || []);
+  }, [rosters, myRosterId]);
+
+  const renderRow = (item) => {
+    const pid = item.player_id;
+    const p = playersDb?.[pid];
+    const val = valueOf[pid]?.value;
+    const mine = ownedByMe.has(pid);
+    if (!p) return null;
+    const name = p.full_name || `${p.first_name || ''} ${p.last_name || ''}`.trim() || pid;
+    return (
+      <div key={pid} className="sd-row-hover" style={{ display: 'flex', alignItems: 'center', padding: '6px 8px', gap: 8 }}>
+        <PosTag pos={p.position || '?'} />
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={{ fontSize: 13, fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+            {name}
+            {mine && <span style={{ marginLeft: 6, fontSize: 9, letterSpacing: '0.1em', textTransform: 'uppercase', background: C.accent, color: C.bg, padding: '1px 5px', borderRadius: 2 }}>You</span>}
+          </div>
+          <div style={{ fontSize: 10, color: C.fgSubtle }}>{p.team || 'FA'} · {item.count.toLocaleString()} moves (24h)</div>
+        </div>
+        {val !== undefined && (
+          <div className="sd-mono" style={{ fontSize: 12, fontWeight: 700, color: C.fg }}>{Math.round(val).toLocaleString()}</div>
+        )}
+      </div>
+    );
+  };
+
+  return (
+    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))', gap: 16 }}>
+      <div className="sd-card" style={{ padding: 14 }}>
+        <div className="sd-display" style={{ fontSize: 16, fontWeight: 600, marginBottom: 4 }}>↗ Trending Adds</div>
+        <div style={{ fontSize: 11, color: C.fgSubtle, marginBottom: 10 }}>Most-added players across all leagues, last 24 hours</div>
+        <div style={{ display: 'grid', gap: 2 }}>
+          {(trendAdd || []).slice(0, 12).map(renderRow)}
+          {(!trendAdd || trendAdd.length === 0) && <div style={{ fontSize: 12, color: C.fgMuted }}>None.</div>}
+        </div>
+      </div>
+      <div className="sd-card" style={{ padding: 14 }}>
+        <div className="sd-display" style={{ fontSize: 16, fontWeight: 600, marginBottom: 4 }}>↘ Trending Drops</div>
+        <div style={{ fontSize: 11, color: C.fgSubtle, marginBottom: 10 }}>Most-dropped players across all leagues, last 24 hours</div>
+        <div style={{ display: 'grid', gap: 2 }}>
+          {(trendDrop || []).slice(0, 10).map(renderRow)}
+          {(!trendDrop || trendDrop.length === 0) && <div style={{ fontSize: 12, color: C.fgMuted }}>None.</div>}
+        </div>
+      </div>
+    </div>
+  );
+};
+
+const TradeComparatorCard = ({ playersDb, valueOf, myRosterId, rosters, teamNameOf, pickItems, pickAvgByYearRound }) => {
+  const [sideA, setSideA] = useState([]);
+  const [sideB, setSideB] = useState([]);
+
+  useEffect(() => {
+    setSideA([]); setSideB([]);
+  }, [myRosterId]);
+
+  // Helper: get value for any item ID (player or pick)
+  const valueOfItem = (id) => {
+    if (id.startsWith('pick:')) {
+      const [_, yr, rd] = id.split(':');
+      return pickAvgByYearRound?.[`${yr}-${rd}`] || 0;
+    }
+    return valueOf[id]?.value || 0;
+  };
+
+  const totalA = sideA.reduce((sum, id) => sum + valueOfItem(id), 0);
+  const totalB = sideB.reduce((sum, id) => sum + valueOfItem(id), 0);
+  const diff = totalA - totalB;
+  const winner = Math.abs(diff) < 100 ? 'even' : (diff > 0 ? 'A' : 'B');
+
+  const remove = (side, id) => {
+    if (side === 'A') setSideA(s => s.filter(p => p !== id));
+    else setSideB(s => s.filter(p => p !== id));
+  };
+
+  return (
+    <div className="sd-card" style={{ padding: 16 }}>
+      <div className="sd-display" style={{ fontSize: 18, fontWeight: 600, marginBottom: 4 }}>Trade Comparator</div>
+      <div style={{ fontSize: 11, color: C.fgSubtle, marginBottom: 16 }}>
+        Search players or picks (try "2026 1st"). Totals update live. In dynasty, fair trades are usually within ~10% on each side.
+      </div>
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr auto 1fr', gap: 16, alignItems: 'flex-start' }}>
+        <TradeSide
+          label="You give"
+          total={totalA}
+          winner={winner === 'A'}
+          items={sideA}
+          playersDb={playersDb}
+          valueOf={valueOf}
+          pickItems={pickItems}
+          pickAvgByYearRound={pickAvgByYearRound}
+          onRemove={id => remove('A', id)}
+          onAdd={id => setSideA(s => [...s, id])}
+          otherSide={sideB}
+        />
+        <div style={{ paddingTop: 38, fontSize: 18, color: C.fgMuted }} className="sd-display">↔</div>
+        <TradeSide
+          label="You get"
+          total={totalB}
+          winner={winner === 'B'}
+          items={sideB}
+          playersDb={playersDb}
+          valueOf={valueOf}
+          pickItems={pickItems}
+          pickAvgByYearRound={pickAvgByYearRound}
+          onRemove={id => remove('B', id)}
+          onAdd={id => setSideB(s => [...s, id])}
+          otherSide={sideA}
+        />
+      </div>
+      {(sideA.length > 0 || sideB.length > 0) && (
+        <div style={{ marginTop: 16, padding: 12, background: C.bgAlt, borderRadius: 3, fontSize: 13 }}>
+          {winner === 'even' && <span><strong>≈ Roughly fair.</strong> Difference: {Math.round(Math.abs(diff)).toLocaleString()}</span>}
+          {winner === 'A' && <span><strong style={{ color: C.danger }}>You'd be giving up more value.</strong> Net cost: {Math.round(diff).toLocaleString()} ({((diff / Math.max(totalA, 1)) * 100).toFixed(1)}%)</span>}
+          {winner === 'B' && <span><strong style={{ color: C.success }}>You'd be getting more value.</strong> Net gain: {Math.round(-diff).toLocaleString()} ({((-diff / Math.max(totalB, 1)) * 100).toFixed(1)}%)</span>}
+        </div>
+      )}
+    </div>
+  );
+};
+
+// Helper: resolve any item ID (player or pick) to display info
+const resolveItem = (id, playersDb, valueOf, pickItems, pickAvgByYearRound) => {
+  if (id && id.startsWith('pick:')) {
+    const [_, yr, rd] = id.split(':');
+    return {
+      isPick: true,
+      name: `${yr} ${ordinal(parseInt(rd, 10))}`,
+      position: 'PICK',
+      team: '',
+      value: pickAvgByYearRound?.[`${yr}-${rd}`] || 0,
+    };
+  }
+  const p = playersDb?.[id];
+  if (!p) return null;
+  return {
+    isPick: false,
+    name: p.full_name || `${p.first_name || ''} ${p.last_name || ''}`.trim() || id,
+    position: p.position || '?',
+    team: p.team || 'FA',
+    value: valueOf?.[id]?.value || 0,
+  };
+};
+
+const TradeSide = ({ label, total, winner, items, playersDb, valueOf, pickItems, pickAvgByYearRound, onRemove, onAdd, otherSide }) => {
+  const exclude = useMemo(() => [...items, ...otherSide], [items, otherSide]);
+  return (
+    <div>
+      <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', marginBottom: 8 }}>
+        <div style={{ fontSize: 11, letterSpacing: '0.15em', textTransform: 'uppercase', color: C.fgSubtle, fontWeight: 700 }}>{label}</div>
+        <div className="sd-mono" style={{ fontSize: 18, fontWeight: 700, color: winner ? C.success : C.fg }}>{Math.round(total).toLocaleString()}</div>
+      </div>
+      <PlayerPicker playersDb={playersDb} pickItems={pickItems} onPick={onAdd} exclude={exclude} />
+      <div style={{ display: 'grid', gap: 4, marginTop: 8, minHeight: 60 }}>
+        {items.length === 0 && <div style={{ padding: 10, background: C.bgAlt, borderRadius: 3, fontSize: 12, color: C.fgMuted, textAlign: 'center' }}>No assets added yet</div>}
+        {items.map(id => {
+          const info = resolveItem(id, playersDb, valueOf, pickItems, pickAvgByYearRound);
+          if (!info) return null;
+          return (
+            <div key={id} style={{ display: 'flex', alignItems: 'center', padding: '6px 8px', background: C.bgAlt, borderRadius: 3, gap: 8 }}>
+              <PosTag pos={info.position} />
+              <div style={{ flex: 1, fontSize: 13, fontWeight: 600 }}>{info.name}{info.team && <span style={{ marginLeft: 6, fontSize: 10, color: C.fgSubtle, fontWeight: 400 }}>{info.team}</span>}</div>
+              <div className="sd-mono" style={{ fontSize: 12, fontWeight: 700 }}>{Math.round(info.value).toLocaleString()}</div>
+              <button onClick={() => onRemove(id)} style={{ border: 'none', background: 'transparent', color: C.fgMuted, cursor: 'pointer', fontSize: 14, padding: 0, width: 18 }} title="Remove">×</button>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+};
+
+const PlayerPicker = ({ playersDb, pickItems = [], onPick, exclude = [] }) => {
+  const [query, setQuery] = useState('');
+  const [focused, setFocused] = useState(false);
+  const excludeSet = useMemo(() => new Set(exclude), [exclude]);
+
+  const results = useMemo(() => {
+    if (!query || query.length < 2) return [];
+    const q = query.toLowerCase();
+    const out = [];
+
+    // Match picks first (shorter list, often what users want)
+    pickItems.forEach(p => {
+      if (excludeSet.has(p.id)) return;
+      if (p.name.toLowerCase().includes(q) || p.shortName.toLowerCase().includes(q)) {
+        out.push({ id: p.id, isPick: true, label: p.name, sub: 'Rookie pick', value: p.value, position: 'PICK', team: '' });
+      }
+    });
+
+    // Match players
+    if (playersDb) {
+      let added = 0;
+      for (const [id, p] of Object.entries(playersDb)) {
+        if (added >= 8) break;
+        if (excludeSet.has(id)) continue;
+        if (!p.position || !['QB', 'RB', 'WR', 'TE'].includes(p.position)) continue;
+        if (!p.team && p.status !== 'Active') continue;
+        const name = (p.full_name || `${p.first_name || ''} ${p.last_name || ''}`).toLowerCase();
+        if (name.includes(q)) {
+          out.push({
+            id,
+            isPick: false,
+            label: p.full_name || `${p.first_name || ''} ${p.last_name || ''}`.trim(),
+            sub: p.team || 'FA',
+            position: p.position,
+            team: p.team || 'FA',
+          });
+          added++;
+        }
+      }
+    }
+    return out.slice(0, 10);
+  }, [query, playersDb, pickItems, excludeSet]);
+
+  return (
+    <div style={{ position: 'relative' }}>
+      <input
+        className="sd-input"
+        value={query}
+        onChange={e => setQuery(e.target.value)}
+        onFocus={() => setFocused(true)}
+        onBlur={() => setTimeout(() => setFocused(false), 200)}
+        placeholder="Search player name or pick (e.g. '2026 1st')…"
+        style={{ width: '100%', boxSizing: 'border-box' }}
+      />
+      {focused && results.length > 0 && (
+        <div style={{ position: 'absolute', top: '100%', left: 0, right: 0, marginTop: 2, background: C.card, border: `1px solid ${C.border}`, borderRadius: 3, zIndex: 10, boxShadow: '0 8px 24px -8px rgba(0,0,0,0.15)', maxHeight: 280, overflowY: 'auto' }} className="sd-scrollbar">
+          {results.map(r => (
+            <div
+              key={r.id}
+              onMouseDown={() => { onPick(r.id); setQuery(''); }}
+              style={{ padding: '8px 10px', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 8, borderBottom: `1px solid ${C.border}` }}
+              onMouseEnter={e => e.currentTarget.style.background = C.bgAlt}
+              onMouseLeave={e => e.currentTarget.style.background = 'transparent'}
+            >
+              <PosTag pos={r.position} />
+              <div style={{ flex: 1, fontSize: 13, fontWeight: 600 }}>{r.label}</div>
+              <div style={{ fontSize: 11, color: C.fgSubtle, fontFamily: 'JetBrains Mono, monospace' }}>{r.sub}</div>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+};
+
+/* ============================================================
+   FOOTER
+   ============================================================ */
+const Footer = () => (
+  <div style={{ marginTop: 48, paddingTop: 20, borderTop: `1px solid ${C.border}`, fontSize: 11, color: C.fgSubtle, textAlign: 'center', lineHeight: 1.6 }}>
+    Live data via Sleeper public API · No login or API key required<br />
+    Player projections aren't exposed in Sleeper's public API · Matchup screens show actual scored points once games are played
+  </div>
+);
+
+const root = ReactDOM.createRoot(document.getElementById('root'));
+root.render(<SleeperDashboard />);
+  </script>
+</body>
+</html>
